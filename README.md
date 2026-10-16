@@ -389,6 +389,46 @@ MCP server *configuration* needs nothing here. The harness's config (e.g.
 `~/.claude.json`) is mounted in from the host, so servers you've registered there work
 as long as the command they run exists in the image.
 
+**One-off MCP servers (Claude Code).** For a server you only need now and then, such as
+one with broader credentials, skip `~/.claude.json`. Put it in its own config file on
+the host, kept outside any repo with `chmod 600` since it holds the secret. Then load it
+for a single session with Claude Code's `--mcp-config`:
+
+```json
+{
+  "mcpServers": {
+    "graph-review": {
+      "type": "stdio",
+      "command": "defender-xdr-mcp",
+      "env": {
+        "AZURE_TENANT_ID": "<tenant>",
+        "AZURE_CLIENT_ID": "<client-id>",
+        "AZURE_CLIENT_SECRET": "<secret>",
+        "GRAPH_MCP_TOOLSETS": "graph"
+      }
+    }
+  }
+}
+```
+
+```sh
+F=$HOME/.config/agentcontainer/graph-review.mcp.json
+run.sh --mount "$F:$F:ro" --mcp-config "$F" --allowedTools mcp__graph-review
+```
+
+- `run.sh` handles `--mount` itself and forwards the `-` flags to `claude`.
+- The servers in `~/.claude.json` still load alongside this one.
+- `--allowedTools` is optional: `mcp__<server>` with no tool name allows every tool of
+  that server without a prompt. Only use it for read-only tools.
+- Use `$HOME` rather than `~` in the `--mount` value: the shell doesn't expand a `~` that
+  comes after a `:`.
+- The next plain `run.sh` doesn't have the server, and nothing is written to the host's
+  config.
+- The secret is readable inside that session, but only in sessions where you mount the
+  file.
+- With `run.ps1`, pass the translated container path to `--mcp-config`, e.g.
+  `/c/Users/me/...`.
+
 **Python.** Python 3.14 (from the deadsnakes PPA) is the default `python3`/`python`.
 Each zsh session looks for `.venv/bin/activate` in the current directory and its
 parents, and activates the first one it finds. Nothing creates the venv for you: run
