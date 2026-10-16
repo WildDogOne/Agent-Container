@@ -72,7 +72,7 @@ fi
 # refuses to run under a different UID). install.sh chowns them to 1000:1000 at build;
 # only re-chown when the remap above moved dev off those IDs, since -R over a whole
 # install isn't free.
-for path in $(sed -n 's/^owned=//p' /etc/devcontainer/harness.conf | tail -n 1); do
+for path in $(sed -n 's/^owned=//p' /etc/agentcontainer/harness.conf | tail -n 1); do
   if [ -e "$path" ] && [ "$(stat -c '%u:%g' "$path")" != "$(id -u dev):$(id -g dev)" ]; then
     chown -R dev:dev "$path"
   fi
@@ -128,16 +128,16 @@ mkdir -p "$HOME"
 chown dev:dev "$HOME"
 
 # run.sh (without --allow-config) mounts the harness's `staged` files (harness.conf)
-# read-only under /etc/devcontainer/staged/, at their path relative to $HOME, instead of
+# read-only under /etc/agentcontainer/staged/, at their path relative to $HOME, instead of
 # at $HOME itself. The harness rewrites them on every start (e.g. ~/.claude.json), so a
 # plain :ro mount would break it - copy them into the container's writable layer
 # instead: the harness can change them freely, but nothing reaches the host and they're
 # discarded with the container (--rm).
-if [ -d /etc/devcontainer/staged ]; then
-  (cd /etc/devcontainer/staged && find . -type f) | while IFS= read -r rel; do
+if [ -d /etc/agentcontainer/staged ]; then
+  (cd /etc/agentcontainer/staged && find . -type f) | while IFS= read -r rel; do
     rel="${rel#./}"
     mkdir -p "$(dirname "$HOME/$rel")"
-    cp "/etc/devcontainer/staged/$rel" "$HOME/$rel"
+    cp "/etc/agentcontainer/staged/$rel" "$HOME/$rel"
     chown dev:dev "$HOME/$rel"
     chmod 600 "$HOME/$rel"
   done
@@ -149,7 +149,7 @@ fi
 # beyond the mounts, read-only config, egress allowlist) is what makes acceptable, but
 # which shouldn't apply to `claude` run natively. Forwarded args come after it, so e.g.
 # `run.sh --permission-mode manual` still overrides it (last one wins).
-harness_command="$(sed -n 's/^command=//p' /etc/devcontainer/harness.conf | tail -n 1)"
+harness_command="$(sed -n 's/^command=//p' /etc/agentcontainer/harness.conf | tail -n 1)"
 if [ "$#" -eq 0 ]; then
   set -- zsh -lc "exec $harness_command"
 elif [ "${1#-}" != "$1" ]; then

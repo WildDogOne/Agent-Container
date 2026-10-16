@@ -4,7 +4,7 @@
 # than a param() block, so `--continue`-style harness flags pass through untouched:
 #
 #   cd C:\path\to\project
-#   C:\path\to\Devcontainer\run.ps1 [--harness claude] [--allow-config] [--continue] ...
+#   C:\path\to\Agent-Container\run.ps1 [--harness claude] [--allow-config] [--continue] ...
 #
 # Differences from run.sh, all forced by the host being Windows:
 #
@@ -167,7 +167,7 @@ $harnessConfFile = Join-Path $PSScriptRoot "harnesses\$harnessName\harness.conf"
 if (-not (Test-Path -LiteralPath $harnessConfFile -PathType Leaf)) {
   Fail "unknown harness '$harnessName' (no $harnessConfFile)"
 }
-$image = "devcontainer:$harnessName"
+$image = "agentcontainer:$harnessName"
 
 # See harnesses\README.md for the keys. Space-separated lists; last line wins.
 function Get-HarnessConf([string]$key) {
@@ -324,7 +324,7 @@ if ($allowConfig) {
     if (Test-Path -LiteralPath $p) { Add-Bind $p "$homeTarget/$entry" -ReadOnly }
   }
   foreach ($entry in $harnessStaged) {
-    Add-Bind (Get-HostHomePath $entry) "/etc/devcontainer/staged/$entry" -ReadOnly
+    Add-Bind (Get-HostHomePath $entry) "/etc/agentcontainer/staged/$entry" -ReadOnly
   }
 }
 

@@ -1,4 +1,4 @@
-# Devcontainer
+# Agent-Container
 
 Run an AI coding agent like [Claude Code](https://docs.claude.com/en/docs/claude-code) in
 full-auto mode without handing it your whole machine.
@@ -40,13 +40,13 @@ installed in the image.
 ## Quick start
 
 ```sh
-git clone https://github.com/WildDogOne/Devcontainer.git ~/Devcontainer
-cd ~/Devcontainer
-./build.sh                     # builds devcontainer:claude (one image per harness)
+git clone https://github.zhaw.ch/Security-Operations-Center/Agent-Container.git ~/Agent-Container
+cd ~/Agent-Container
+./build.sh                     # builds agentcontainer:claude (one image per harness)
 
 cd ~/path/to/some-project
-~/Devcontainer/run.sh --allow-config   # first run only: log in, see below
-~/Devcontainer/run.sh                  # every run after that
+~/Agent-Container/run.sh --allow-config   # first run only: log in, see below
+~/Agent-Container/run.sh                  # every run after that
 ```
 
 **First run.** `run.sh` creates `~/.claude` and `~/.claude.json` if they don't exist.
@@ -61,7 +61,7 @@ as settings, plugins or MCP servers, need `--allow-config` again. See
 (it works in fish too):
 
 ```sh
-alias claudecli="$HOME/Devcontainer/run.sh"
+alias claudecli="$HOME/Agent-Container/run.sh"
 ```
 
 **Check your setup.** `run.sh --help` lists every flag and what a session on this
@@ -70,7 +70,7 @@ machine would get, without starting anything:
 ```text
 Effective config on this machine:
   Harness:        claude
-  Image:          devcontainer:claude
+  Image:          agentcontainer:claude
   Network:        bridge (default; pass --host-network to change)
   Runtime:        --privileged (default; pass --sysbox to use sysbox-runc instead, if installed)
   Allowlist:      image default (allowed-domains.txt baked in at build; pass --allow-list to override)
@@ -91,9 +91,9 @@ Effective config on this machine:
 its own image and its state in `~/.hermes`:
 
 ```sh
-./build.sh hermes                                # devcontainer:hermes
-~/Devcontainer/run.sh --harness hermes --allow-config   # first run: pick a model and log in
-~/Devcontainer/run.sh --harness hermes                  # every run after that
+./build.sh hermes                                # agentcontainer:hermes
+~/Agent-Container/run.sh --harness hermes --allow-config   # first run: pick a model and log in
+~/Agent-Container/run.sh --harness hermes                  # every run after that
 ```
 
 On the first run, `hermes setup` (or `hermes model`) inside the session walks you
@@ -115,8 +115,8 @@ Set `HARNESS=hermes` in `config/run.local.sh` to make it the default.
 `~/.local/share/opencode` and its settings in `~/.config/opencode`:
 
 ```sh
-./build.sh opencode                                # devcontainer:opencode
-~/Devcontainer/run.sh --harness opencode           # then /connect (or `opencode auth login`) to add a provider
+./build.sh opencode                                # agentcontainer:opencode
+~/Agent-Container/run.sh --harness opencode           # then /connect (or `opencode auth login`) to add a provider
 ```
 
 Logins and API keys live with the session data, so they persist without
@@ -147,7 +147,7 @@ harness. They can go anywhere in the argument list:
 
 | Flag                                     | Effect (this session only)                                                                                                          |
 |------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
-| `--harness NAME`                         | Run `harnesses/NAME` (image `devcontainer:NAME`) instead of the default (`$HARNESS`, else `claude`).                                 |
+| `--harness NAME`                         | Run `harnesses/NAME` (image `agentcontainer:NAME`) instead of the default (`$HARNESS`, else `claude`).                                 |
 | `--mount PATH` / `--mount HOST:CTR[:ro]` | Extra bind mount. A bare path mounts read-write at the same path on both sides. Repeatable.                                         |
 | `--allow-list FILE`                      | Replace the whole egress allowlist with `FILE` (same format as `allowed-domains.txt`).                                              |
 | `--allow-internet`                       | Drop the domain allowlist (ports 80/443 only, still proxied and logged). Can't be combined with `--allow-list`.                     |
@@ -201,7 +201,7 @@ flowchart LR
         allowoverride["--allow-list file"]
         hostsock["host /var/run/docker.sock<br/>(--allow-container only)"]
         dockerd_host["Docker daemon<br/>(runc --privileged, or sysbox-runc)"]
-        image[("devcontainer:NAME")]
+        image[("agentcontainer:NAME")]
     end
 
     subgraph ctr["Container (--rm, one per session)"]
@@ -403,7 +403,7 @@ parents, and activates the first one it finds. Nothing creates the venv for you:
   file existed, so Docker created it as root. Repair with
   `sudo rmdir ~/.claude.json; sudo chown -R "$USER": ~/.claude`, then follow
   the first-run steps in [Quick start](#quick-start).
-- **`image devcontainer:NAME not found`:** run `./build.sh NAME`.
+- **`image agentcontainer:NAME not found`:** run `./build.sh NAME`.
 - **A change to the image has no effect:** rebuild with `./build.sh`.
 - **A download or API call is blocked:** run `sudo tail /tmp/squid-access.log` inside
   the container to see which domain was refused, then use `--allow-list` or add it to
@@ -414,7 +414,7 @@ parents, and activates the first one it finds. Nothing creates the venv for you:
 ## Contributing
 
 Issues and pull requests are welcome at
-[github.com/WildDogOne/Devcontainer](https://github.com/WildDogOne/Devcontainer). There's
+[github.zhaw.ch/Security-Operations-Center/Agent-Container](https://github.zhaw.ch/Security-Operations-Center/Agent-Container). There's
 no test suite: to check a change, rebuild with `./build.sh` and start a session with
 `run.sh bash`. Record user-visible changes under `## Unreleased` in
 [CHANGELOG.md](CHANGELOG.md). If you change a `run.sh` flag or a mounted path, make the

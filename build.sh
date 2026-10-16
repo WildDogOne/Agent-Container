@@ -1,5 +1,5 @@
 #!/bin/sh
-# Builds one image per harness, devcontainer:<harness>. With no arguments, builds every
+# Builds one image per harness, agentcontainer:<harness>. With no arguments, builds every
 # harness under harnesses/; otherwise just the ones named (e.g. `./build.sh claude`).
 set -eu
 cd "$(dirname "$0")"
@@ -34,14 +34,14 @@ done
 # Repo root as the build context: the Dockerfile needs image/, harnesses/ and config/
 # (.dockerignore keeps everything else out).
 for harness in "$@"; do
-  echo "build.sh: building devcontainer:$harness" >&2
-  docker build --no-cache -f image/Dockerfile --build-arg "HARNESS=$harness" -t "devcontainer:$harness" .
+  echo "build.sh: building agentcontainer:$harness" >&2
+  docker build --no-cache -f image/Dockerfile --build-arg "HARNESS=$harness" -t "agentcontainer:$harness" .
 done
 
 # --no-cache means every rebuild produces a brand-new image and dangles whatever
-# devcontainer:<harness> pointed at before (docker moves the tag, not the image). Those
-# pile up fast since nothing else references them. The `project=devcontainer` label
+# agentcontainer:<harness> pointed at before (docker moves the tag, not the image). Those
+# pile up fast since nothing else references them. The `project=agentcontainer` label
 # (see Dockerfile) scopes this prune to our own leftovers, not unrelated dangling images
 # elsewhere on the host. run.sh always runs containers with --rm, so no stopped
 # containers should be left to clean up here.
-docker image prune -f --filter "label=project=devcontainer" --filter "dangling=true" >/dev/null
+docker image prune -f --filter "label=project=agentcontainer" --filter "dangling=true" >/dev/null

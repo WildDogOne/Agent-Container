@@ -49,6 +49,12 @@ the change takes effect.
 
 ### Changed
 
+- **rebuild** Renamed from Devcontainer to Agent-Container. The repo now lives at
+  [github.zhaw.ch/Security-Operations-Center/Agent-Container](https://github.zhaw.ch/Security-Operations-Center/Agent-Container).
+  Images are now `agentcontainer:<harness>` (was `devcontainer:<harness>`), labeled
+  `project=agentcontainer`, with the baked-in config under `/etc/agentcontainer/`. Run
+  `./build.sh` to build the new images, then remove the old ones with
+  `docker rmi $(docker images -q --filter label=project=devcontainer)`.
 - **Repository restructured, Claude Code split out into a "harness".** The sandbox
   moved from `claudecontainer/` to the repo root: `build.sh`/`run.sh` (and the `.ps1`
   scripts) at the top, `Dockerfile`/`entrypoint.sh`/`squid.conf` in `image/`,

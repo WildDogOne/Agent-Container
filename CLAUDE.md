@@ -29,7 +29,7 @@ three readers: `run.sh`, `run.ps1`, `entrypoint.sh`) rather than special-casing 
 ## Commands
 
 ```sh
-./build.sh [harness...]    # docker build -f image/Dockerfile --build-arg HARNESS=x -t devcontainer:x . (always --no-cache); no args = all harnesses
+./build.sh [harness...]    # docker build -f image/Dockerfile --build-arg HARNESS=x -t agentcontainer:x . (always --no-cache); no args = all harnesses
 cd ~/some-project && /path/to/run.sh          # launch a session scoped to that directory
 run.sh --harness claude    # pick the harness (default: $HARNESS from env/config/run.local.sh, else claude)
 run.sh --continue          # resume last session (any `-`-prefixed arg forwards to the harness)
@@ -57,20 +57,20 @@ There's nothing to lint or test here; the way to validate a change is to rebuild
 ## Architecture
 
 **`build.sh`** → seeds `config/extra-setup.sh` and `config/allowed-domains.txt` from
-their `.example`s if missing, builds `devcontainer:<harness>` for each requested harness
+their `.example`s if missing, builds `agentcontainer:<harness>` for each requested harness
 (repo root as context; `.dockerignore` whitelists `image/`, `harnesses/` and the two
-config files), then prunes dangling images labeled `project=devcontainer` (the
+config files), then prunes dangling images labeled `project=agentcontainer` (the
 `--no-cache` builds otherwise pile up untagged layers).
 
 **`harness.conf`** → `key=value`, space-separated lists, paths relative to `$HOME`:
 `command` (default command; `-` args appended), `state` (rw dirs, created if missing),
 `config` (ro on top of state unless `--allow-config`, skipped if missing), `staged`
 (files the harness rewrites every start: rw with `--allow-config`, else mounted ro under
-`/etc/devcontainer/staged/<path>` and copied into `$HOME` by `entrypoint.sh`; created on
+`/etc/agentcontainer/staged/<path>` and copied into `$HOME` by `entrypoint.sh`; created on
 the host if missing, `{}` for `.json`), `owned` (absolute image paths that must belong
 to `dev`: chowned to 1000:1000 by `install.sh`, re-chowned by `entrypoint.sh` only when
 the UID remap moved `dev`). Parsed by `run.sh` (bash), `run.ps1`, and `entrypoint.sh`
-(only `command` and `owned`, from the copy baked into `/etc/devcontainer/`).
+(only `command` and `owned`, from the copy baked into `/etc/agentcontainer/`).
 
 **`run.sh`** → per-session launcher, run from the *target* project directory (it resolves
 its own path via `BASH_SOURCE`, so it works as a shell alias from anywhere). Resolves the
@@ -120,7 +120,7 @@ it at startup to the host user's UID/GID, which `run.sh` passes as `HOST_UID`/`H
 (not for host root, rootless Docker or Podman; `CONTAINER_UID`/`CONTAINER_GID` override
 the detection, `CONTAINER_UID=off` disables it). `.venv` auto-activation is wired into
 `/etc/zsh/zshenv`. Then `config/extra-setup.sh`, then the harness: `install.sh`,
-`harness.conf` → `/etc/devcontainer/harness.conf`, and the allowlist (`image/` +
+`harness.conf` → `/etc/agentcontainer/harness.conf`, and the allowlist (`image/` +
 `harnesses/<name>/` + `config/` lists, comments stripped, `sort -u`).
 
 **`image/squid.conf` + allowlist** → loopback-only (`127.0.0.1:3128`) forward proxy

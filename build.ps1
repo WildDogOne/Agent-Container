@@ -1,4 +1,4 @@
-# Windows counterpart of build.sh: builds one devcontainer:<harness> image per harness
+# Windows counterpart of build.sh: builds one agentcontainer:<harness> image per harness
 # through Docker Desktop's WSL2 backend - every harness under harnesses\ with no
 # arguments, otherwise just the ones named (e.g. `.\build.ps1 claude`). Checks the
 # prerequisites first (Docker CLI, WSL2, a running Linux-mode Docker engine - starting
@@ -71,15 +71,15 @@ try {
 
   # Repo root as the build context, same as build.sh.
   foreach ($h in $harnesses) {
-    Write-Host "Building devcontainer:$h"
-    & docker.exe build --no-cache -f image/Dockerfile --build-arg "HARNESS=$h" -t "devcontainer:$h" .
+    Write-Host "Building agentcontainer:$h"
+    & docker.exe build --no-cache -f image/Dockerfile --build-arg "HARNESS=$h" -t "agentcontainer:$h" .
     if ($LASTEXITCODE -ne 0) { throw "docker build failed for $h (exit code $LASTEXITCODE)." }
   }
 
-  # See build.sh: --no-cache dangles the previous devcontainer:<harness> on every
+  # See build.sh: --no-cache dangles the previous agentcontainer:<harness> on every
   # rebuild; the label scopes the prune to our own leftovers.
   $null = Invoke-NativeQuiet docker.exe @('image', 'prune', '-f',
-    '--filter', 'label=project=devcontainer', '--filter', 'dangling=true')
+    '--filter', 'label=project=agentcontainer', '--filter', 'dangling=true')
 } finally {
   Pop-Location
 }

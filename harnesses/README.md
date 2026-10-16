@@ -12,7 +12,7 @@ reads everything harness-specific from these three files:
 | `allowed-domains.txt` | `image/Dockerfile` | Domains the tool needs at runtime, added to the shared allowlist in `image/allowed-domains.txt`. |
 | `harness.conf` | `run.sh`, `run.ps1`, `image/entrypoint.sh` | How to start the tool and which of your host config to mount in - see below. |
 
-Each harness gets its own image, `devcontainer:<name>`, built with `./build.sh <name>`
+Each harness gets its own image, `agentcontainer:<name>`, built with `./build.sh <name>`
 and started with `run.sh --harness <name>`.
 
 ## harness.conf

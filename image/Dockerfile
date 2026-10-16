@@ -4,9 +4,9 @@ FROM ubuntu:24.04
 # at the bottom is shared by every harness, the rest comes from harnesses/<name>/.
 
 # Lets build.sh find and prune old, now-untagged versions of this image left behind by
-# --no-cache rebuilds (each rebuild retags devcontainer:<harness> onto the new image,
+# --no-cache rebuilds (each rebuild retags agentcontainer:<harness> onto the new image,
 # dangling the previous one) without touching unrelated dangling images on the host.
-LABEL project=devcontainer
+LABEL project=agentcontainer
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -160,8 +160,8 @@ LABEL harness=$HARNESS
 
 COPY harnesses/${HARNESS}/ /tmp/harness/
 RUN find /tmp/harness -type f -exec sed -i 's/\r$//' {} + \
-    && mkdir -p /etc/devcontainer \
-    && cp /tmp/harness/harness.conf /etc/devcontainer/harness.conf \
+    && mkdir -p /etc/agentcontainer \
+    && cp /tmp/harness/harness.conf /etc/agentcontainer/harness.conf \
     && sh /tmp/harness/install.sh \
     && rm -rf /tmp/harness
 

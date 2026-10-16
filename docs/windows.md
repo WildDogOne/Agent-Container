@@ -29,8 +29,8 @@ Or download the installer from <https://git-scm.com/download/win>. Then open a *
 PowerShell window so `git` is on `PATH`, and clone the repo:
 
 ```powershell
-git clone https://github.com/WildDogOne/Devcontainer.git
-cd Devcontainer
+git clone https://github.zhaw.ch/Security-Operations-Center/Agent-Container.git
+cd Agent-Container
 ```
 
 `setup.ps1` also installs Git if it's still missing, unless you pass `-SkipGit`. That
@@ -106,8 +106,8 @@ images exactly like `build.sh`, including creating `config\allowed-domains.txt` 
 
 ```powershell
 cd C:\path\to\project
-C:\path\to\Devcontainer\run.ps1 --allow-config   # first run: log in, see README.md
-C:\path\to\Devcontainer\run.ps1                  # afterwards
+C:\path\to\Agent-Container\run.ps1 --allow-config   # first run: log in, see README.md
+C:\path\to\Agent-Container\run.ps1                  # afterwards
 ```
 
 On the first run, `run.ps1` creates the harness's state under `%USERPROFILE%` for you
@@ -116,7 +116,7 @@ On the first run, `run.ps1` creates the harness's state under `%USERPROFILE%` fo
 To launch it by a short name, add a function to your PowerShell profile (`notepad $PROFILE`):
 
 ```powershell
-function claudecli { & 'C:\path\to\Devcontainer\run.ps1' @args }
+function claudecli { & 'C:\path\to\Agent-Container\run.ps1' @args }
 ```
 
 `run.ps1` takes the same flags as `run.sh`; see [Usage](../README.md#usage). For a

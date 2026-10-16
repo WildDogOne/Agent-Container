@@ -125,7 +125,7 @@ bun) from scratch. With two harnesses, a change to anything - even a one-line
 drop `--no-cache` and rely on layer caching (the harness-specific layers still
 invalidate when `harnesses/` or `config/` inputs change), or keep `--no-cache`
 only for the harness section. Not urgent: the dangling-image prune at the bottom
-is correct and properly scoped by the `project=devcontainer` label.
+is correct and properly scoped by the `project=agentcontainer` label.
 
 ## Housekeeping
 

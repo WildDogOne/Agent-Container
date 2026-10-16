@@ -10,7 +10,7 @@
 #
 # `--harness <name>` (consumed here, not forwarded on) picks which harness to run, i.e.
 # which harnesses/<name>/harness.conf decides the mounts and default command, and which
-# devcontainer:<name> image to start (build it with `build.sh <name>`). Defaults to
+# agentcontainer:<name> image to start (build it with `build.sh <name>`). Defaults to
 # $HARNESS (environment or config/run.local.sh), else claude.
 #
 # Runs on Docker's default bridge network unless `--host-network` is passed (consumed
@@ -177,7 +177,7 @@ if [[ ! -f "$harness_conf_file" ]]; then
   echo "run.sh: unknown harness '$harness' (no $harness_conf_file)" >&2
   exit 1
 fi
-image="devcontainer:$harness"
+image="agentcontainer:$harness"
 
 # See harnesses/README.md for the keys. Space-separated lists; last line wins.
 harness_conf() { sed -n "s/^$1=//p" "$harness_conf_file" | tail -n 1; }
@@ -229,7 +229,7 @@ Launches a fresh, disposable sandbox container scoped to \$PWD. Only \$PWD and t
 harness's login/state are mounted in; the container is removed on exit (--rm).
 
   -h, --help        Show this help (reflects this machine's actual config below) and exit.
-  --harness NAME    Which harness to run (harnesses/NAME/, image devcontainer:NAME).
+  --harness NAME    Which harness to run (harnesses/NAME/, image agentcontainer:NAME).
                     Defaults to \$HARNESS, else claude. Available: $(cd "$script_dir/harnesses" && ls -d */ | tr -d / | tr '\n' ' ')
   --host-network    Share the host's network namespace instead of Docker's default
                     bridge network. Only needed if the host's network (e.g. a
@@ -373,7 +373,7 @@ fi
 # Config is read-only unless --allow-config - see the header comment. The per-entry ro
 # mounts nest inside the rw state mounts above (docker mounts parents first). Staged
 # files can't just be :ro since the harness rewrites them on every start, so they're
-# mounted read-only under /etc/devcontainer/staged/ and entrypoint.sh copies them into
+# mounted read-only under /etc/agentcontainer/staged/ and entrypoint.sh copies them into
 # the container's writable layer. With --allow-config the config entries are still
 # mounted, just read-write: one outside every state dir (opencode's ~/.config/opencode)
 # would otherwise not be in the container at all.
@@ -393,7 +393,7 @@ else
     fi
   done
   for entry in ${harness_staged[@]+"${harness_staged[@]}"}; do
-    docker_args+=(-v "$HOME/$entry:/etc/devcontainer/staged/$entry:ro")
+    docker_args+=(-v "$HOME/$entry:/etc/agentcontainer/staged/$entry:ro")
   done
 fi
 
