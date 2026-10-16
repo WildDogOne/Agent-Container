@@ -1,0 +1,14 @@
+# Your own extra egress allowlist entries, added on top of image/allowed-domains.txt
+# (shared defaults) and harnesses/<name>/allowed-domains.txt. Copy this file to
+# allowed-domains.txt (gitignored; build.sh does it for you on the first build) and add
+# whatever your workflows need - e.g. an MCP server's API host. Rebuild afterwards.
+#
+# Squid dstdomain ACL: one entry per line. A leading "." matches the domain itself and
+# every subdomain; without it, only that exact host matches. Add `:port` for a service
+# that isn't on 80/443 (e.g. a self-hosted model server); that port is then allowed for
+# every listed domain.
+#
+# To replace the whole list for one session instead, use run.sh --allow-list <file>.
+
+# .example.com
+# llm.example.lan:8080

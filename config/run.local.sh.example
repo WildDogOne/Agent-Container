@@ -1,0 +1,30 @@
+# Optional, per-machine settings for run.sh. Copy this file to config/run.local.sh
+# (gitignored - never committed, since the paths here are personal to whatever host
+# you're running on) and edit it. run.sh sources it automatically if present and just
+# skips it if not, so this is safe to leave unconfigured.
+
+# Harness to run when no --harness is passed (default: claude). See harnesses/.
+# HARNESS=claude
+
+# Extra mounts beyond $PWD and the harness's own state.
+#
+# Each entry is one `docker run -v` argument, host:container[:ro]. Same path on both
+# sides keeps things simple but isn't required - unlike $PWD, these don't need to line
+# up with anything the container already expects.
+
+EXTRA_MOUNTS=(
+  # "$HOME/Obsidian:$HOME/Obsidian"
+)
+
+# More paths (relative to $HOME) to keep read-only unless --allow-config, on top of the
+# harness's own `config` list in harness.conf - e.g. a statusline script your Claude
+# Code settings point at:
+# EXTRA_CONFIG_RO_PATHS=(.claude/statusline.sh)
+
+# UID/GID that dev takes inside the container, so files it writes to the mounts are
+# owned by that user on the host. Unset = automatic: your own UID/GID, or no remap
+# (dev stays 1000:1000) as root, under rootless Docker or under Podman. Set a number
+# to override the detection, or "off" to never remap. CONTAINER_GID defaults to your
+# own GID and only applies together with CONTAINER_UID.
+# CONTAINER_UID=1234
+# CONTAINER_GID=1234

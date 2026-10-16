@@ -1,0 +1,13 @@
+# Egress opencode needs at runtime, on top of image/allowed-domains.txt.
+# Same format: one squid dstdomain entry per line, a leading "." also matches subdomains.
+# opencode talks to whichever model provider you configure: add yours to
+# config/allowed-domains.txt if it isn't listed here.
+
+# Model catalog (models.opencode.ai), OpenCode Zen/Go inference, login, sharing
+.opencode.ai
+
+# Common providers
+.anthropic.com
+.openai.com
+.openrouter.ai
+api.githubcopilot.com

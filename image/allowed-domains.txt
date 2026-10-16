@@ -1,0 +1,31 @@
+# Default egress allowlist, shared by every harness. The image's final list is this file
+# + harnesses/<name>/allowed-domains.txt + your own config/allowed-domains.txt.
+# Squid dstdomain ACL: one entry per line. A leading "." matches the domain itself and
+# every subdomain; without it, only that exact host matches.
+
+# npm registry
+.npmjs.org
+
+# Node.js apt repo (NodeSource, for the nodejs package itself)
+deb.nodesource.com
+
+# GitHub (git, gh CLI, raw/object downloads, gh's apt repo)
+.github.com
+.githubusercontent.com
+cli.github.com
+
+# PyPI
+.pypi.org
+.pythonhosted.org
+
+# uv/uvx installer + self-update
+.astral.sh
+
+# Ubuntu package mirrors
+archive.ubuntu.com
+security.ubuntu.com
+ports.ubuntu.com
+
+# Docker Hub (for the inner dockerd's image pulls)
+.docker.io
+.docker.com

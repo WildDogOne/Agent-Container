@@ -1,0 +1,22 @@
+# Optional, per-machine settings for run.ps1 - the Windows counterpart of run.local.sh
+# (see run.local.sh.example for the reasoning). Copy this file to config\run.local.ps1
+# (gitignored) and edit it; run.ps1 dot-sources it if present.
+
+# Harness to run when no --harness is passed (default: claude). See harnesses\.
+# $HARNESS = 'claude'
+
+# Each EXTRA_MOUNTS entry is host[:container][:ro], with a Windows host path. Without a
+# container path it's mounted at the translated path (C:\data -> /c/data).
+
+$EXTRA_MOUNTS = @(
+  # "$env:USERPROFILE\Obsidian"
+  # 'D:\datasets:/data:ro'
+)
+
+# More paths (relative to %USERPROFILE%) to keep read-only unless --allow-config, on
+# top of the harness's own `config` list in harness.conf (see run.sh):
+# $EXTRA_CONFIG_RO_PATHS += '.claude/statusline.ps1'
+
+# No UID/GID remap by default on Windows (see run.ps1). Force one with:
+# $CONTAINER_UID = '1000'
+# $CONTAINER_GID = '1000'

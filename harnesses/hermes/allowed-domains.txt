@@ -1,0 +1,16 @@
+# Egress Hermes Agent needs at runtime, on top of image/allowed-domains.txt.
+# Same format: one squid dstdomain entry per line, a leading "." also matches subdomains.
+# Hermes talks to whichever model provider you configure: add yours to
+# config/allowed-domains.txt if it isn't listed here.
+
+# Nous Portal (login + inference), docs/catalog pages
+.nousresearch.com
+nousresearch.github.io
+
+# Model catalog (provider/model list)
+models.dev
+
+# Common providers
+.openrouter.ai
+.anthropic.com
+.openai.com

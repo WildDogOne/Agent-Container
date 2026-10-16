@@ -1,0 +1,13 @@
+# Egress Claude Code needs at runtime, on top of image/allowed-domains.txt.
+# Same format: one squid dstdomain entry per line, a leading "." also matches subdomains.
+
+# API, auth, docs, plugin downloads
+.anthropic.com
+.claude.ai
+.claude.com
+storage.googleapis.com
+
+# Telemetry / error reporting
+.statsig.com
+.sentry.io
+.datadoghq.com
