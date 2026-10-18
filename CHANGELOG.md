@@ -49,6 +49,9 @@ the change takes effect.
 
 ### Changed
 
+- **rebuild** `run.sh --allow-internet` now also drops squid's port restrictions, so any
+  host (bare IPs included) is reachable on any port, e.g. a Kubernetes API server on
+  `:6443`. Previously only 80/443 plus allowlisted ports worked.
 - **rebuild** Renamed from Devcontainer to Agent-Container. The repo now lives at
   [github.zhaw.ch/Security-Operations-Center/Agent-Container](https://github.zhaw.ch/Security-Operations-Center/Agent-Container).
   Images are now `agentcontainer:<harness>` (was `devcontainer:<harness>`), labeled

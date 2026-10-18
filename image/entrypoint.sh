@@ -40,14 +40,18 @@ sed 's/:[0-9]*$//' /tmp/allowlist | sort -u > /etc/squid/allowed-dstdomains.txt
 { printf '80\n443\n'; sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' /tmp/allowlist; } | sort -un > /etc/squid/allowed-ports.txt
 rm -f /tmp/allowlist
 
-# run.sh --allow-internet sets this to drop the domain allowlist check entirely for this
-# session, leaving the Safe_ports/SSL_ports port restrictions in squid.conf untouched -
-# still only 80/443 (plus any ports from the allowlist), just no longer filtered by domain.
+# run.sh --allow-internet sets this to drop both the domain allowlist and the
+# Safe_ports/SSL_ports port restrictions for this session - any host (bare IPs too) on any
+# port, e.g. a Kubernetes API server on :6443. Still proxied and logged. The port checks
+# exist to stop a proxy being abused for e.g. SMTP, which doesn't apply to a squid bound
+# to loopback inside a disposable container.
 # Session-scoped only: patches this container's own writable-layer copy of squid.conf,
 # discarded with it (--rm); the image's squid.conf stays static.
 if [ "${SQUID_ALLOW_INTERNET:-0}" = "1" ]; then
-  echo "entrypoint.sh: --allow-internet passed, disabling squid's domain allowlist for this session" >&2
-  sed -i 's/^http_access allow allowed_dst$/http_access allow all/' /etc/squid/squid.conf
+  echo "entrypoint.sh: --allow-internet passed, disabling squid's domain and port allowlists for this session" >&2
+  sed -i -e 's/^http_access allow allowed_dst$/http_access allow all/' \
+         -e '/^http_access deny !Safe_ports$/d' \
+         -e '/^http_access deny CONNECT !SSL_ports$/d' /etc/squid/squid.conf
 fi
 
 # run.sh passes the invoking host user's UID/GID - remap dev (1000:1000 in the image) to

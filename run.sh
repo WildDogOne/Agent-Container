@@ -34,11 +34,11 @@
 # path run.local.sh doesn't already cover; for anything needed on every session on this
 # machine, put it in run.local.sh instead.
 #
-# `--allow-internet` (consumed here, not forwarded on) drops squid's domain allowlist for this
-# one session: entrypoint.sh patches the running config so `http_access allow
-# allowed_dst` becomes `http_access allow all`, while leaving the Safe_ports/SSL_ports
-# checks in place (still only plain HTTP on 80 and CONNECT to 443 through the proxy).
-# Traffic is still proxied and logged, just no longer domain-filtered. Only affects this
+# `--allow-internet` (consumed here, not forwarded on) drops squid's domain and port
+# allowlists for this one session: entrypoint.sh patches the running config so `http_access
+# allow allowed_dst` becomes `http_access allow all` and removes the Safe_ports/SSL_ports
+# checks (any host, bare IPs included, on any port).
+# Traffic is still proxied and logged, just no longer filtered. Only affects this
 # disposable container - the image, allowed-domains.txt, and every other session are
 # untouched. Mutually exclusive with --allow-list (one drops the list, the other swaps
 # it - combining them is almost certainly not what you meant).
@@ -239,9 +239,8 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     PATH (one domain per line, same format as allowed-domains.txt).
                     Doesn't touch the image or other sessions. Consumed here, never
                     forwarded to docker/the harness.
-  --allow-internet  Drop squid's domain allowlist for this session only - any host is
-                    reachable, still only over plain HTTP (80) or CONNECT to 443,
-                    still proxied and logged. Mutually exclusive with --allow-list.
+  --allow-internet  Drop squid's domain and port allowlists for this session only -
+                    any host (bare IPs too) on any port, still proxied and logged. Mutually exclusive with --allow-list.
                     Consumed here, never forwarded to docker/the harness.
   --mount SPEC      Add one extra bind mount for this session only. A bare PATH mounts
                     read-write at that same path on both sides; use host:container[:ro]

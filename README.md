@@ -150,7 +150,7 @@ harness. They can go anywhere in the argument list:
 | `--harness NAME`                         | Run `harnesses/NAME` (image `agentcontainer:NAME`) instead of the default (`$HARNESS`, else `claude`).                                 |
 | `--mount PATH` / `--mount HOST:CTR[:ro]` | Extra bind mount. A bare path mounts read-write at the same path on both sides. Repeatable.                                         |
 | `--allow-list FILE`                      | Replace the whole egress allowlist with `FILE` (same format as `allowed-domains.txt`).                                              |
-| `--allow-internet`                       | Drop the domain allowlist (ports 80/443 only, still proxied and logged). Can't be combined with `--allow-list`.                     |
+| `--allow-internet`                       | Drop the domain and port allowlists (any host, any port; still proxied and logged). Can't be combined with `--allow-list`.         |
 | `--host-network`                         | Share the host's network namespace instead of the bridge network. For VPNs that block the bridge.                                   |
 | `--allow-container`                      | Mount the **host's** Docker socket instead of running a nested `dockerd`. Root-equivalent, see [below](#docker-inside-the-sandbox). |
 | `--sysbox`                               | Use the `sysbox-runc` runtime instead of `--privileged`. See [docs/sysbox.md](docs/sysbox.md).                                      |
@@ -390,9 +390,10 @@ MCP server *configuration* needs nothing here. The harness's config (e.g.
 as long as the command they run exists in the image.
 
 **One-off MCP servers (Claude Code).** For a server you only need now and then, such as
-one with broader credentials, skip `~/.claude.json`. Put it in its own config file on
-the host, kept outside any repo with `chmod 600` since it holds the secret. Then load it
-for a single session with Claude Code's `--mcp-config`:
+one with broader credentials, skip `~/.claude.json`. Put it in its own config file, e.g.
+`~/.claude/graph-review.mcp.json`, with `chmod 600` since it holds the secret. Keep it out of
+git, for example with an entry in `.git/info/exclude`. Then load it for a single
+session with Claude Code's `--mcp-config`:
 
 ```json
 {
@@ -412,8 +413,7 @@ for a single session with Claude Code's `--mcp-config`:
 ```
 
 ```sh
-F=$HOME/.config/agentcontainer/graph-review.mcp.json
-run.sh --mount "$F:$F:ro" --mcp-config "$F" --allowedTools mcp__graph-review
+run.sh --mount "$F:$F:ro" --mcp-config "$HOME/.claude/graph-review.mcp.json" --allowedTools mcp__graph-review
 ```
 
 - `run.sh` handles `--mount` itself and forwards the `-` flags to `claude`.
