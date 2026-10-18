@@ -1,0 +1,18 @@
+# Editor / IDE
+.idea/
+
+# Claude Code
+.claude
+CLAUDE.md
+
+# Local review notes
+code_review.md
+
+# Python virtualenv (host-side tooling)
+.venv/
+
+# Personal, per-machine config - see the .example next to each.
+config/run.local.sh
+config/run.local.ps1
+config/allowed-domains.txt
+config/extra-setup.sh
