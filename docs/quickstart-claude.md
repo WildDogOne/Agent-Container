@@ -4,22 +4,78 @@ Run [Claude Code](https://docs.claude.com/en/docs/claude-code) in a throwaway co
 that sees your project and `~/.claude`, and nothing else from your home directory.
 Claude Code is the default harness, so `run.sh` needs no `--harness` flag.
 
+> [!NOTE]
+> **Windows:** do the one-time host setup in [windows.md](windows.md) first (WSL2,
+> Docker Desktop, Git), then use the PowerShell blocks below. Paths like `~/.claude`
+> mean `%USERPROFILE%\.claude` there.
+
 ## 1. Build
+
+Linux:
 
 ```sh
 git clone https://github.zhaw.ch/Security-Operations-Center/Agent-Container.git ~/Agent-Container
 cd ~/Agent-Container
-./build.sh claude              # agentcontainer:claude
+./build.sh claude             # agentcontainer:claude
+```
+
+Windows (PowerShell):
+
+```powershell
+git clone https://github.zhaw.ch/Security-Operations-Center/Agent-Container.git "$HOME\Agent-Container"
+cd "$HOME\Agent-Container"
+.\build.ps1 claude            # agentcontainer:claude
 ```
 
 You don't need Claude Code installed on the host; `harnesses/claude/install.sh`
 installs it in the image with `npm install -g @anthropic-ai/claude-code`.
 
-## 2. First run: log in
+## 2. Add a shortcut
+
+`run.sh` always works on the directory you start it from, so give it a short name you
+can call from any project. Pick the block for your shell, run it once, and open a new
+terminal (or run the last line) to pick it up.
+
+bash (for zsh, use `~/.zshrc` in both lines):
+
+```sh
+echo 'alias claudecli="$HOME/Agent-Container/run.sh"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+fish:
+
+```fish
+alias --save claudecli "$HOME/Agent-Container/run.sh"
+```
+
+Windows PowerShell (adds a function to your `$PROFILE`):
+
+```powershell
+if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Force $PROFILE | Out-Null }
+Add-Content $PROFILE "function claudecli { & `"$HOME\Agent-Container\run.ps1`" @args }"
+. $PROFILE
+```
+
+If you cloned the repo somewhere other than `~/Agent-Container`, change the path. On
+Windows, `. $PROFILE` fails if script execution is disabled; see
+[Execution policy](windows.md#execution-policy). `claudecli --help` checks the shortcut
+works: it prints the harness, mounts and network settings without starting anything.
+
+## 3. First run: log in
+
+Linux:
 
 ```sh
 cd ~/path/to/some-project
-~/Agent-Container/run.sh --allow-config
+claudecli --allow-config
+```
+
+Windows (PowerShell):
+
+```powershell
+cd C:\path\to\some-project
+claudecli --allow-config
 ```
 
 `run.sh` creates `~/.claude` and `~/.claude.json` if they're missing. Claude Code walks
@@ -28,76 +84,47 @@ paste the code back into the terminal. `--allow-config` is needed this once so t
 onboarding state in `~/.claude.json` is saved. The login token
 (`~/.claude/.credentials.json`) is saved either way.
 
-## 3. Every run after that
+## 4. Every run after that
 
 ```sh
-~/Agent-Container/run.sh               # claude --permission-mode auto in $PWD
-~/Agent-Container/run.sh --continue    # `-` args are forwarded to claude
-~/Agent-Container/run.sh --permission-mode manual   # override the auto default
-~/Agent-Container/run.sh bash          # a plain shell instead of claude
+claudecli                            # claude --permission-mode auto in the current folder
+claudecli --continue                 # `-` args are forwarded to claude
+claudecli --permission-mode manual   # override the auto default
+claudecli bash                       # a plain shell instead of claude
 ```
 
-Add an alias to start it from anywhere: `alias claudecli="$HOME/Agent-Container/run.sh"`.
+The same commands work in PowerShell through the `claudecli` function.
 
 ## How a session works
 
 ```mermaid
----
-config:
-  # mermaid.live look (Mermaid 12 defaults, set explicitly for older renderers)
-  theme: redux-color
-  look: neo
-  layout: elk
-  themeVariables:
-    fontFamily: '"Recursive Variable", Recursive, "trebuchet ms", verdana, arial, sans-serif'
-    fontSize: 14px
-  flowchart:
-    curve: basis
-    padding: 15
-    nodeSpacing: 50
-    rankSpacing: 50
-    diagramPadding: 8
-    wrappingWidth: 120
-    minNodeWidth: 120
----
 flowchart LR
     subgraph host["Host"]
-        runsh["run.sh<br/>(default harness)"]
-        pwd["Your current folder"]
-        state["~/.claude<br/>login, transcripts, history"]
-        cfg["~/.claude/settings.json, CLAUDE.md,<br/>agents/, commands/, skills/,<br/>hooks/, plugins/, output-styles/ ..."]
-        staged["~/.claude.json<br/>MCP servers, trust state"]
-        image[("agentcontainer:claude")]
         buildsh["build.sh"]
+        runsh["run.sh<br/>(default harness)"]
+        image[("agentcontainer:claude")]
+        subgraph mounts["Bind mounts"]
+            direction LR
+            pwd["Your current folder"]
+            state["Read Write: Claude transcripts & history"]
+            staged["Read Only: Login, MCP Settings"]
+        end
     end
 
     subgraph ctr["Container (--rm, one per session)"]
-        pid1["entrypoint.sh<br/>PID 1, root"]
-        squid["squid<br/>127.0.0.1:3128"]
-        dockerd["nested dockerd"]
-        copy["/etc/agentcontainer/staged/<br/>.claude.json (ro)"]
-        claude["claude --permission-mode auto<br/>user dev, HOME = host $HOME"]
+        pid1["entrypoint.sh"]
+        claude["claudecode"]
+        squid["Squid Proxy"]
     end
 
-    allow["Allowlist:<br/>.anthropic.com, .claude.ai, .claude.com,<br/>storage.googleapis.com, telemetry<br/>+ registries, GitHub, Docker Hub"]
+    allow["Allowlist"]
     internet(("Internet"))
-    buildsh --> |Build Image| image
-    runsh -- "docker run" --> image --> pid1
-    pid1 -- "1: start" --> squid
-    pid1 -- "2: start" --> dockerd
-    pid1 -- "3: copy into $HOME" --> copy
-    pid1 -- "4: exec sudo -u dev" --> claude
 
-    pwd -. "rw, same path" .-> claude
-    state -. "rw" .-> claude
-    cfg -. "ro (rw with --allow-config)" .-> claude
-    staged -. "ro mount (rw with --allow-config)" .-> copy
-    copy -. "edits discarded on exit" .-> claude
-    ssh -. "bind mount" .-> claude
-
-    claude -- "HTTPS_PROXY" --> squid
-    claude -- "docker CLI" --> dockerd
-    squid --> allow --> internet
+    buildsh -- "Build Image" --> image
+    runsh -- "docker run" --> pid1
+    image -- "starts from" --> pid1 --> claude
+    mounts -.-> claude
+    claude -- "HTTPS_PROXY" --> squid --> allow --> internet
 ```
 
 - **Read-write:** your project and `~/.claude`, which Claude Code needs for its login,
