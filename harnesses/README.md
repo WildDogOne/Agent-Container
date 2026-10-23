@@ -2,7 +2,9 @@
 
 Each subdirectory here is one coding tool the sandbox can run: `claude/` is Claude Code,
 `hermes/` is [Hermes Agent](https://github.com/NousResearch/hermes-agent), `opencode/` is
-[opencode](https://opencode.ai).
+[opencode](https://opencode.ai). Quickstarts for each are in [`docs/`](../docs/):
+[claude](../docs/quickstart-claude.md), [hermes](../docs/quickstart-hermes.md),
+[opencode](../docs/quickstart-opencode.md).
 The sandbox itself (`image/`, `run.sh`, `run.ps1`) knows nothing about any of them - it
 reads everything harness-specific from these three files:
 

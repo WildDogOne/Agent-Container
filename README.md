@@ -49,6 +49,10 @@ cd ~/path/to/some-project
 ~/Agent-Container/run.sh                  # every run after that
 ```
 
+Step-by-step guides with a diagram of each session:
+[Claude Code](docs/quickstart-claude.md), [Hermes Agent](docs/quickstart-hermes.md),
+[opencode](docs/quickstart-opencode.md).
+
 **First run.** `run.sh` creates `~/.claude` and `~/.claude.json` if they don't exist.
 Claude Code then walks you through onboarding and prints a login URL: open it in a
 browser on the host and paste the code back into the terminal. `--allow-config` is
@@ -98,7 +102,8 @@ its own image and its state in `~/.hermes`:
 
 On the first run, `hermes setup` (or `hermes model`) inside the session walks you
 through choosing a provider; `--allow-config` lets it save `config.yaml` and `.env`.
-Set `HARNESS=hermes` in `config/run.local.sh` to make it the default.
+Set `HARNESS=hermes` in `config/run.local.sh` to make it the default. See
+[docs/quickstart-hermes.md](docs/quickstart-hermes.md) for a walkthrough.
 
 - The allowlist covers Nous Portal, OpenRouter, Anthropic and OpenAI. Any other
   provider needs its API domain in `config/allowed-domains.txt` (then rebuild); for a
@@ -122,7 +127,7 @@ Set `HARNESS=hermes` in `config/run.local.sh` to make it the default.
 Logins and API keys live with the session data, so they persist without
 `--allow-config`; only `~/.config/opencode` (settings, MCP servers, plugins, agents,
 commands) is read-only. Set `HARNESS=opencode` in `config/run.local.sh` to make it the
-default.
+default. See [docs/quickstart-opencode.md](docs/quickstart-opencode.md) for a walkthrough.
 
 - The allowlist covers opencode's own services (model catalog, Zen), Anthropic, OpenAI,
   OpenRouter and GitHub Copilot. Other providers need their API domain in
@@ -257,7 +262,7 @@ flowchart LR
 | `image/` | The shared sandbox: `Dockerfile`, `entrypoint.sh`, the squid config and the default allowlist. Nothing harness-specific. |
 | `config/` | Your per-machine settings, see [Configuration](#configuration). |
 | `lib/` | Helpers for the PowerShell scripts. |
-| `docs/` | Windows and sysbox setup. |
+| `docs/` | Per-harness quickstarts, Windows and sysbox setup. |
 
 ## What the container can see
 
