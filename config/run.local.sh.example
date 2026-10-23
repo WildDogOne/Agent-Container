@@ -35,5 +35,6 @@ EXTRA_MOUNTS=(
 
 # Docker env file passed into every session (--env-file overrides it), e.g. tokens your
 # MCP servers reference as ${VAR} instead of keeping them in ~/.claude.json. Keep it
-# outside the repo and chmod 600. See README.md.
+# outside the repo and chmod 600. See README.md. ~/.config/agentcontainer.env is used
+# without this if it exists; set a different path here, or off to pass none.
 # ENV_FILE="$HOME/.config/agentcontainer.env"

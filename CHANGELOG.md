@@ -13,8 +13,8 @@ the change takes effect.
   harness's new `harness.conf` key `sandboxed_command` instead of `command`. For Claude
   Code that's `claude-sandboxed`, which turns on Claude Code's own Bash sandbox
   (bubblewrap) inside the container: shell commands get no direct network access (only
-  the allowlisted domains, via Claude Code's proxy) and can't read `~/.claude.json` or
-  the login token. Works under `--sysbox` in a nested mode (shared `/proc`, a `bwrap`
+  the allowlisted domains, via Claude Code's proxy) and can't read the login token or
+  the backups of `~/.claude.json` (which may predate moving tokens to `--env-file`). Works under `--sysbox` in a nested mode (shared `/proc`, a `bwrap`
   wrapper adding the ipc/uts/cgroup namespaces sysbox requires, Docker sockets denied as
   files instead of seccomp); refuses to start if bubblewrap doesn't work at all. Opt-in,
   nothing changes without it. **rebuild** (claude image: bubblewrap, socat,
@@ -24,6 +24,9 @@ the change takes effect.
   don't have to sit in plaintext in `~/.claude.json`. Variables the sandbox relies on
   (proxy settings, `HOME`, `HOST_*`, `SQUID_*`, `AGENTCONTAINER_*`, ...) are refused.
   With `--bash-sandbox`, shell commands don't see them. **rebuild** (`entrypoint.sh`)
+- Default env file: without `--env-file`/`ENV_FILE`, `~/.config/agentcontainer.env` is
+  passed in if it exists. `--no-env-file` (or `ENV_FILE=off`) skips it. `run.sh` warns if
+  the env file is accessible by other users or lies inside the mounted `$PWD`.
 - Both flags in `run.ps1` too (`$BASH_SANDBOX`, `$ENV_FILE` in `run.local.ps1`), untested.
 
 - Third harness: [opencode](https://opencode.ai) (`./build.sh opencode`,

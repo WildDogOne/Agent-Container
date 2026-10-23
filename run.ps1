@@ -100,6 +100,7 @@ $allowConfig = $false
 $sysbox = $false
 $cliBashSandbox = $false
 $cliEnvFile = ''
+$noEnvFile = $false
 $cliMounts = New-Object System.Collections.Generic.List[string]
 $forward = New-Object System.Collections.Generic.List[string]
 
@@ -118,6 +119,7 @@ while ($i -lt $cliArgs.Count) {
       if ($i + 1 -ge $cliArgs.Count) { Fail '--env-file requires a path argument' }
       $cliEnvFile = [string]$cliArgs[$i + 1]; $i += 2; continue
     }
+    '--no-env-file'     { $noEnvFile = $true; $i++; continue }
     '--harness' {
       if ($i + 1 -ge $cliArgs.Count) { Fail '--harness requires a harness name' }
       $cliHarness = [string]$cliArgs[$i + 1]; $i += 2; continue
@@ -204,14 +206,25 @@ if ($cliBashSandbox -or [string]$BASH_SANDBOX -eq '1') {
   else { $bashSandboxDesc = "ON (BASH_SANDBOX=1): $sandboxedCommand" }
 }
 
-# See run.sh: --env-file, else ENV_FILE. Docker parses the file; the names are collected
-# for entrypoint.sh (sudo) and checked against the variables the sandbox relies on.
-$envFile = $cliEnvFile
-if (-not $envFile) { $envFile = [string]$ENV_FILE }
+# See run.sh: --env-file, else ENV_FILE, else the default file if it exists; --no-env-file
+# or ENV_FILE=off for none. Docker parses the file; the names are collected for
+# entrypoint.sh (sudo) and checked against the variables the sandbox relies on.
+if ($noEnvFile -and $cliEnvFile) { Fail '--env-file and --no-env-file are mutually exclusive' }
+$defaultEnvFile = Join-Path $env:USERPROFILE '.config\agentcontainer.env'
+$envFile = ''
+if ($noEnvFile) { $envFileDesc = 'none (--no-env-file passed)' }
+elseif ($cliEnvFile) { $envFile = $cliEnvFile; $envFileDesc = '--env-file passed' }
+elseif ([string]$ENV_FILE -eq 'off') { $envFileDesc = 'none ($ENV_FILE = off)' }
+elseif ($ENV_FILE) { $envFile = [string]$ENV_FILE; $envFileDesc = '$ENV_FILE' }
+elseif (Test-Path -LiteralPath $defaultEnvFile -PathType Leaf) { $envFile = $defaultEnvFile; $envFileDesc = 'default' }
+else { $envFileDesc = "none ($defaultEnvFile doesn't exist; pass --env-file or set `$ENV_FILE to use another file)" }
 $envKeys = New-Object System.Collections.Generic.List[string]
 if ($envFile) {
   $envFile = Resolve-HostPath $envFile
   if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) { Fail "env file not found: $envFile" }
+  if ($envFile.StartsWith($projectDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    [Console]::Error.WriteLine("run.ps1: warning: $envFile is inside $projectDir, which is mounted into the session - the harness can read and edit it")
+  }
   foreach ($line in [IO.File]::ReadAllLines($envFile)) {
     $line = $line.TrimEnd("`r")
     if ($line -match '^\s*(#|$)') { continue }
@@ -261,13 +274,13 @@ if ($showHelp) {
   if ($envFile) {
     $envDesc = $envKeysJoined
     if (-not $envDesc) { $envDesc = 'no variables' }
-    $envDesc = "$envFile ($envDesc)"
-  } else { $envDesc = 'none (pass --env-file or set $ENV_FILE to add one)' }
+    $envDesc = "$envFile (${envFileDesc}: $envDesc)"
+  } else { $envDesc = $envFileDesc }
 
   @"
 Usage: run.ps1 [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
                [--allow-container] [--allow-config] [--sysbox] [--mount <path|host:container[:ro]>]...
-               [--bash-sandbox] [--env-file <path>]
+               [--bash-sandbox] [--env-file <path> | --no-env-file]
                [-h|--help] [harness-args... | command...]
 
 Windows/Docker Desktop version of run.sh - same flags, see run.sh --help or README.md

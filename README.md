@@ -162,6 +162,7 @@ harness. They can go anywhere in the argument list:
 | `--allow-config`                         | Let the harness change its config on the host. Read-only by default, see [below](#what-the-container-can-see).                      |
 | `--bash-sandbox`                         | Start the harness's `sandboxed_command`. For Claude Code: its own Bash sandbox on top of the container, see [below](#bash-sandbox).   |
 | `--env-file FILE`                        | Pass the variables in `FILE` (docker env file) into the session, e.g. MCP tokens. See [below](#secrets-for-mcp-servers).            |
+| `--no-env-file`                          | Pass no env file, not even the default `~/.config/agentcontainer.env`.                                                              |
 
 ```sh
 run.sh --mount ~/data --mount ~/models:/models:ro --continue
@@ -366,8 +367,8 @@ it runs. Every Bash command then runs in bubblewrap, inside the container:
   list, so `--allow-list` applies too) and then tunnels through squid itself. Anything
   else waits for your OK or is refused, depending on the permission mode. A tool that
   ignores proxy settings has no network at all instead of a direct route.
-- **Secrets:** `~/.claude.json` and `~/.claude/.credentials.json` (the login token)
-  can't be read by shell commands, and Claude Code's file tools are denied them too.
+- **Secrets:** `~/.claude/.credentials.json` (the login token) and the backups of
+  `~/.claude.json` (`~/.claude.json.*`, `~/.claude/backups/`) can't be read by shell commands, and Claude Code's file tools are denied them too.
   Variables from `--env-file` are removed from shell commands' environment.
 - **No way around it:** `allowUnsandboxedCommands` is off, so Claude can't rerun a
   failing command outside the sandbox. `sudo` doesn't work in sandboxed commands either.
@@ -418,9 +419,16 @@ ELASTIC_TOKEN=...
 JIRA_PERSONAL_TOKEN=...
 ```
 
+`run.sh` picks up `~/.config/agentcontainer.env` (`%USERPROFILE%\.config\agentcontainer.env`
+for `run.ps1`) on its own if it exists. Otherwise:
+
 ```sh
-run.sh --env-file ~/.config/agentcontainer.env     # or ENV_FILE=... in config/run.local.sh
+run.sh --env-file ~/secrets/other.env     # or ENV_FILE=... in config/run.local.sh
+run.sh --no-env-file                      # none this session (ENV_FILE=off: never)
 ```
+
+`run.sh` warns if the file is readable by other users or lies inside the mounted project
+directory, where the harness could read and edit it.
 
 Expansion works in `env`, `args`, `command`, `url` and `headers`, for servers in
 `~/.claude.json` as well as `.mcp.json`. Use your own names: Claude Code leaves

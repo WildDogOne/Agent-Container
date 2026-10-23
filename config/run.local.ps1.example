@@ -24,5 +24,6 @@ $EXTRA_MOUNTS = @(
 # Start every session as if --bash-sandbox was passed (see run.local.sh.example):
 # $BASH_SANDBOX = 1
 
-# Docker env file passed into every session (--env-file overrides it):
+# Docker env file passed into every session (--env-file overrides it). Defaults to
+# %USERPROFILE%\.config\agentcontainer.env if it exists; 'off' passes none:
 # $ENV_FILE = "$env:USERPROFILE\.config\agentcontainer.env"

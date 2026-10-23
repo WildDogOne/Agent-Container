@@ -78,14 +78,16 @@
 # it the default) starts the harness's `sandboxed_command` instead of its `command` - for
 # Claude Code, its own Bash sandbox (bubblewrap) on top of this container: real network
 # isolation for shell commands instead of squid's proxy-env-only filtering, and no read
-# access to ~/.claude.json and the login token. Refused for a harness without one. See
+# access to the login token. Refused for a harness without one. See
 # README.md.
 #
 # `--env-file <path>` (consumed here, not forwarded on; ENV_FILE in run.local.sh sets a
 # default) passes the variables in a docker env file into the session, e.g. tokens that
 # MCP servers reference as ${VAR}, so they don't have to sit in plaintext in
-# ~/.claude.json. Names the sandbox itself relies on (proxy settings, HOME, HOST_*, the
-# flags above) are refused, so an env file can't quietly switch them off.
+# ~/.claude.json. Without either, ~/.config/agentcontainer.env is used if it exists;
+# `--no-env-file` (or ENV_FILE=off) skips it. Names the sandbox itself relies on (proxy
+# settings, HOME, HOST_*, the flags above) are refused, so an env file can't quietly
+# switch them off.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,6 +102,7 @@ allow_config=0
 sysbox=0
 cli_bash_sandbox=0
 cli_env_file=""
+no_env_file=0
 cli_mounts=()
 args=()
 while [[ $# -gt 0 ]]; do
@@ -114,6 +117,7 @@ while [[ $# -gt 0 ]]; do
       cli_env_file="$2"
       shift 2
       ;;
+    --no-env-file) no_env_file=1; shift ;;
     -h|--help) show_help=1; shift ;;
     --allow-internet) allow_internet=1; shift ;;
     --allow-container) allow_container=1; shift ;;
@@ -229,13 +233,35 @@ if [[ "$cli_bash_sandbox" -eq 1 || "$BASH_SANDBOX" == 1 ]]; then
   fi
 fi
 
-# --env-file, else ENV_FILE from the environment/run.local.sh. Docker parses the file
-# itself; the names are only collected here so entrypoint.sh can keep them through
+# --env-file, else ENV_FILE from the environment/run.local.sh, else the default path if
+# that file exists (a missing default is skipped quietly - not everyone has secrets).
+# --no-env-file / ENV_FILE=off turn the default off too. Docker parses the file itself; the names are only collected here so entrypoint.sh can keep them through
 # sudo, and checked against the variables this sandbox relies on: an env file setting
 # e.g. SQUID_ALLOW_INTERNET=1 or HTTPS_PROXY= would otherwise quietly undo the egress
 # allowlist. Docker env file format: KEY=value, or a bare KEY to copy it from this
 # shell's environment; # starts a comment line.
-env_file="${cli_env_file:-$ENV_FILE}"
+if [[ "$no_env_file" -eq 1 && -n "$cli_env_file" ]]; then
+  echo "run.sh: --env-file and --no-env-file are mutually exclusive" >&2
+  exit 1
+fi
+default_env_file="$HOME/.config/agentcontainer.env"
+env_file=""
+if [[ "$no_env_file" -eq 1 ]]; then
+  env_file_desc="none (--no-env-file passed)"
+elif [[ -n "$cli_env_file" ]]; then
+  env_file="$cli_env_file"
+  env_file_desc="--env-file passed"
+elif [[ "$ENV_FILE" == off ]]; then
+  env_file_desc="none (ENV_FILE=off)"
+elif [[ -n "$ENV_FILE" ]]; then
+  env_file="$ENV_FILE"
+  env_file_desc="ENV_FILE"
+elif [[ -f "$default_env_file" ]]; then
+  env_file="$default_env_file"
+  env_file_desc="default"
+else
+  env_file_desc="none ($default_env_file doesn't exist; pass --env-file or set ENV_FILE to use another file)"
+fi
 env_keys=""
 if [[ -n "$env_file" ]]; then
   if [[ ! -f "$env_file" ]]; then
@@ -243,6 +269,15 @@ if [[ -n "$env_file" ]]; then
     exit 1
   fi
   env_file="$(cd "$(dirname "$env_file")" && pwd)/$(basename "$env_file")"
+  # Warnings only: the file is the user's to place. ls instead of stat, whose flags
+  # differ between GNU and BSD/macOS; characters 5-10 are the group/other bits.
+  env_file_mode="$(ls -ld "$env_file")"
+  if [[ "${env_file_mode:4:6}" != "------" ]]; then
+    echo "run.sh: warning: $env_file is accessible by other users - chmod 600 it" >&2
+  fi
+  if [[ "$env_file" == "$PWD"/* ]]; then
+    echo "run.sh: warning: $env_file is inside $PWD, which is mounted into the session - the harness can read and edit it" >&2
+  fi
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%$'\r'}"
     [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
@@ -298,7 +333,7 @@ if [[ "$show_help" -eq 1 ]]; then
   cat <<EOF
 Usage: run.sh [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
               [--allow-container] [--allow-config] [--sysbox] [--mount <path|host:container[:ro]>]...
-              [--bash-sandbox] [--env-file <path>]
+              [--bash-sandbox] [--env-file <path> | --no-env-file]
               [-h|--help] [harness-args... | command...]
 
 Launches a fresh, disposable sandbox container scoped to \$PWD. Only \$PWD and the
@@ -343,13 +378,17 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
   --bash-sandbox    Start the harness's sandboxed_command instead of its command. For
                     Claude Code: its own Bash sandbox (bubblewrap) on top of the
                     container - shell commands get no direct network access (only via
-                    the allowlist) and can't read ~/.claude.json or the login token.
+                    the allowlist) and can't read the login token.
                     BASH_SANDBOX=1 in run.local.sh makes it the default. Consumed here,
                     never forwarded to docker/the harness.
   --env-file PATH   Pass the variables in PATH (docker env file: KEY=value per line) into
                     the session, e.g. tokens MCP servers reference as \${VAR}. Overrides
-                    ENV_FILE from run.local.sh. Variables the sandbox relies on (proxy
-                    settings, HOME, HOST_*, ...) are refused. Consumed here, never
+                    ENV_FILE from run.local.sh, which overrides the default
+                    ~/.config/agentcontainer.env (used if it exists). Variables the
+                    sandbox relies on (proxy settings, HOME, HOST_*, ...) are refused.
+                    Consumed here, never forwarded to docker/the harness.
+  --no-env-file     Pass no env file this session, not even the default (ENV_FILE=off
+                    in run.local.sh does the same permanently). Consumed here, never
                     forwarded to docker/the harness.
 
 Anything else starting with '-' is forwarded to the harness itself (e.g. --continue).
@@ -366,7 +405,7 @@ Effective config on this machine:
   Harness config: $([[ "$allow_config" -eq 1 ]] && echo "WRITABLE (--allow-config passed - edits persist on the host)" || echo "read-only (default; pass --allow-config to let the harness change it)")
   dev UID:GID:    $remap_desc
   Bash sandbox:   $bash_sandbox_desc
-  Env file:       $([[ -n "$env_file" ]] && echo "$env_file (${env_keys:-no variables})" || echo "none (pass --env-file or set ENV_FILE to add one)")
+  Env file:       $([[ -n "$env_file" ]] && echo "$env_file ($env_file_desc: ${env_keys:-no variables})" || echo "$env_file_desc")
   Mounts:
     $PWD -> $PWD
 EOF

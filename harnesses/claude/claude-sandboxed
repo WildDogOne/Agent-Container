@@ -6,7 +6,7 @@
 #
 # Why a second layer: squid only filters what honors the proxy env vars, so a Bash
 # command that ignores them (curl --noproxy, raw sockets) reaches the network directly,
-# and ~/.claude.json (MCP config, often with tokens) is plain readable by any command.
+# and the login token in ~/.claude/.credentials.json is plain readable by any command.
 # Inside Claude Code's sandbox every Bash command gets its own network namespace with
 # Claude Code's proxy as the only way out, and the paths below can't be read at all.
 # File tools and MCP servers aren't sandboxed by it; the permission rules below cover
@@ -87,7 +87,10 @@ jq -n \
         # The Docker/containerd sockets too, in both modes: root on the nested dockerd
         # means a container with all files of this one mounted and its own network.
         # Seccomp already blocks Unix sockets in normal mode; this also covers nested.
-        denyRead: ["~/.claude.json", "~/.claude.json.*", "~/.claude/.credentials.json",
+        # ~/.claude.json itself stays readable (MCP tokens belong in the env file, as
+        # ${VAR}), but its backups (~/.claude.json.*, ~/.claude/backups) can predate that.
+        denyRead: ["~/.claude.json.*", "~/.claude/.credentials.json",
+                   "~/.claude/backups",
                    "/run/docker.sock", "/run/docker", "/run/containerd"],
         denyWrite: [$settings_dir]
       },
@@ -95,9 +98,9 @@ jq -n \
     } + (if ($env_vars | length) > 0 then { credentials: { envVars: $env_vars } } else {} end)),
     permissions: {
       deny: [
-        "Read(~/.claude.json)",
         "Read(~/.claude.json.*)",
         "Read(~/.claude/.credentials.json)",
+        "Read(~/.claude/backups/**)",
         "Edit(/\($settings_dir)/**)"
       ]
     }
