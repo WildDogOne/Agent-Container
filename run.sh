@@ -73,6 +73,19 @@
 # agents, commands and skills all run with full access on the HOST the next time you
 # run the harness natively, so a session that gets talked into editing them could
 # escape the sandbox. See harnesses/README.md.
+#
+# `--bash-sandbox` (consumed here, not forwarded on; BASH_SANDBOX=1 in run.local.sh makes
+# it the default) starts the harness's `sandboxed_command` instead of its `command` - for
+# Claude Code, its own Bash sandbox (bubblewrap) on top of this container: real network
+# isolation for shell commands instead of squid's proxy-env-only filtering, and no read
+# access to ~/.claude.json and the login token. Refused for a harness without one. See
+# README.md.
+#
+# `--env-file <path>` (consumed here, not forwarded on; ENV_FILE in run.local.sh sets a
+# default) passes the variables in a docker env file into the session, e.g. tokens that
+# MCP servers reference as ${VAR}, so they don't have to sit in plaintext in
+# ~/.claude.json. Names the sandbox itself relies on (proxy settings, HOME, HOST_*, the
+# flags above) are refused, so an env file can't quietly switch them off.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,11 +98,22 @@ allow_internet=0
 allow_container=0
 allow_config=0
 sysbox=0
+cli_bash_sandbox=0
+cli_env_file=""
 cli_mounts=()
 args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host-network) host_network=1; shift ;;
+    --bash-sandbox) cli_bash_sandbox=1; shift ;;
+    --env-file)
+      if [[ $# -lt 2 ]]; then
+        echo "run.sh: --env-file requires a path argument" >&2
+        exit 1
+      fi
+      cli_env_file="$2"
+      shift 2
+      ;;
     -h|--help) show_help=1; shift ;;
     --allow-internet) allow_internet=1; shift ;;
     --allow-container) allow_container=1; shift ;;
@@ -167,6 +191,8 @@ EXTRA_CONFIG_RO_PATHS=()
 HARNESS="${HARNESS:-claude}"
 CONTAINER_UID="${CONTAINER_UID:-}"
 CONTAINER_GID="${CONTAINER_GID:-}"
+BASH_SANDBOX="${BASH_SANDBOX:-0}"
+ENV_FILE="${ENV_FILE:-}"
 if [[ -f "$script_dir/config/run.local.sh" ]]; then
   . "$script_dir/config/run.local.sh"
 fi
@@ -185,6 +211,55 @@ read -r -a harness_state <<< "$(harness_conf state)"
 read -r -a harness_staged <<< "$(harness_conf staged)"
 read -r -a harness_config <<< "$(harness_conf config)"
 config_ro_paths=(${harness_config[@]+"${harness_config[@]}"} ${EXTRA_CONFIG_RO_PATHS[@]+"${EXTRA_CONFIG_RO_PATHS[@]}"})
+
+# --bash-sandbox, or BASH_SANDBOX=1 from the environment/run.local.sh. entrypoint.sh
+# refuses too, but checking here gives the error before docker starts anything.
+bash_sandbox=0
+bash_sandbox_desc="off (default; pass --bash-sandbox or set BASH_SANDBOX=1 to enable)"
+if [[ "$cli_bash_sandbox" -eq 1 || "$BASH_SANDBOX" == 1 ]]; then
+  if [[ -z "$(harness_conf sandboxed_command)" ]]; then
+    echo "run.sh: --bash-sandbox: harness '$harness' has no sandboxed_command in its harness.conf" >&2
+    exit 1
+  fi
+  bash_sandbox=1
+  if [[ "$cli_bash_sandbox" -eq 1 ]]; then
+    bash_sandbox_desc="ON (--bash-sandbox passed): $(harness_conf sandboxed_command)"
+  else
+    bash_sandbox_desc="ON (BASH_SANDBOX=1): $(harness_conf sandboxed_command)"
+  fi
+fi
+
+# --env-file, else ENV_FILE from the environment/run.local.sh. Docker parses the file
+# itself; the names are only collected here so entrypoint.sh can keep them through
+# sudo, and checked against the variables this sandbox relies on: an env file setting
+# e.g. SQUID_ALLOW_INTERNET=1 or HTTPS_PROXY= would otherwise quietly undo the egress
+# allowlist. Docker env file format: KEY=value, or a bare KEY to copy it from this
+# shell's environment; # starts a comment line.
+env_file="${cli_env_file:-$ENV_FILE}"
+env_keys=""
+if [[ -n "$env_file" ]]; then
+  if [[ ! -f "$env_file" ]]; then
+    echo "run.sh: env file not found: $env_file" >&2
+    exit 1
+  fi
+  env_file="$(cd "$(dirname "$env_file")" && pwd)/$(basename "$env_file")"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+    key="${line%%=*}"
+    if ! [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      echo "run.sh: $env_file: invalid variable name '$key'" >&2
+      exit 1
+    fi
+    case "$key" in
+      HOME|PATH|USER|SHELL|SUDO_*|HOST_*|AGENTCONTAINER_*|SQUID_*|ALLOW_CONTAINER|[Hh][Tt][Tt][Pp]_[Pp][Rr][Oo][Xx][Yy]|[Hh][Tt][Tt][Pp][Ss]_[Pp][Rr][Oo][Xx][Yy]|[Nn][Oo]_[Pp][Rr][Oo][Xx][Yy]|[Aa][Ll][Ll]_[Pp][Rr][Oo][Xx][Yy])
+        echo "run.sh: $env_file: '$key' is reserved by the sandbox and can't be set from an env file" >&2
+        exit 1
+        ;;
+    esac
+    env_keys="${env_keys:+$env_keys,}$key"
+  done < "$env_file"
+fi
 
 # entrypoint.sh remaps dev's UID/GID (1000 in the image) to remap_uid/remap_gid, so files
 # written to the bind mounts stay owned by the host user whatever their UID. Automatic
@@ -223,6 +298,7 @@ if [[ "$show_help" -eq 1 ]]; then
   cat <<EOF
 Usage: run.sh [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
               [--allow-container] [--allow-config] [--sysbox] [--mount <path|host:container[:ro]>]...
+              [--bash-sandbox] [--env-file <path>]
               [-h|--help] [harness-args... | command...]
 
 Launches a fresh, disposable sandbox container scoped to \$PWD. Only \$PWD and the
@@ -264,6 +340,17 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     installed and registered with this host's Docker daemon - see
                     https://github.com/nestybox/sysbox. Consumed here, never forwarded
                     to docker/the harness.
+  --bash-sandbox    Start the harness's sandboxed_command instead of its command. For
+                    Claude Code: its own Bash sandbox (bubblewrap) on top of the
+                    container - shell commands get no direct network access (only via
+                    the allowlist) and can't read ~/.claude.json or the login token.
+                    BASH_SANDBOX=1 in run.local.sh makes it the default. Consumed here,
+                    never forwarded to docker/the harness.
+  --env-file PATH   Pass the variables in PATH (docker env file: KEY=value per line) into
+                    the session, e.g. tokens MCP servers reference as \${VAR}. Overrides
+                    ENV_FILE from run.local.sh. Variables the sandbox relies on (proxy
+                    settings, HOME, HOST_*, ...) are refused. Consumed here, never
+                    forwarded to docker/the harness.
 
 Anything else starting with '-' is forwarded to the harness itself (e.g. --continue).
 A bare command (e.g. \`run.sh bash\`) overrides the harness's default command
@@ -278,6 +365,8 @@ Effective config on this machine:
   Docker socket:  $([[ "$allow_container" -eq 1 ]] && echo "HOST /var/run/docker.sock (--allow-container passed - root-equivalent host access)" || echo "sandboxed nested dockerd only (default; pass --allow-container to use the host daemon)")
   Harness config: $([[ "$allow_config" -eq 1 ]] && echo "WRITABLE (--allow-config passed - edits persist on the host)" || echo "read-only (default; pass --allow-config to let the harness change it)")
   dev UID:GID:    $remap_desc
+  Bash sandbox:   $bash_sandbox_desc
+  Env file:       $([[ -n "$env_file" ]] && echo "$env_file (${env_keys:-no variables})" || echo "none (pass --env-file or set ENV_FILE to add one)")
   Mounts:
     $PWD -> $PWD
 EOF
@@ -426,6 +515,22 @@ fi
 # Root-equivalent access to the host: off by default, opt-in per session only.
 if [[ "$allow_container" -eq 1 ]]; then
   docker_args+=(-v /var/run/docker.sock:/var/run/docker.sock -e "ALLOW_CONTAINER=1")
+fi
+
+# entrypoint.sh starts the harness's sandboxed_command instead of its command - see
+# the --bash-sandbox block near the top.
+if [[ "$bash_sandbox" -eq 1 ]]; then
+  docker_args+=(-e "AGENTCONTAINER_BASH_SANDBOX=1")
+fi
+
+# Docker reads the env file itself; entrypoint.sh needs the names to keep them through
+# sudo, and claude-sandboxed hides them from sandboxed shell commands. An env file with
+# only comments sets nothing, so there's nothing to keep either.
+if [[ -n "$env_file" ]]; then
+  docker_args+=(--env-file "$env_file")
+  if [[ -n "$env_keys" ]]; then
+    docker_args+=(-e "AGENTCONTAINER_ENV_KEYS=$env_keys")
+  fi
 fi
 
 # Forwards the host's ssh-agent for outbound git SSH auth (no private keys copied in).

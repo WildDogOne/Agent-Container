@@ -20,3 +20,9 @@ $EXTRA_MOUNTS = @(
 # No UID/GID remap by default on Windows (see run.ps1). Force one with:
 # $CONTAINER_UID = '1000'
 # $CONTAINER_GID = '1000'
+
+# Start every session as if --bash-sandbox was passed (see run.local.sh.example):
+# $BASH_SANDBOX = 1
+
+# Docker env file passed into every session (--env-file overrides it):
+# $ENV_FILE = "$env:USERPROFILE\.config\agentcontainer.env"

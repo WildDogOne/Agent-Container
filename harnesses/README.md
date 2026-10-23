@@ -26,6 +26,7 @@ home directory and are mounted at the same path inside the container.
 | Key | Meaning |
 |---|---|
 | `command` | Default command when `run.sh` is given none. Arguments starting with `-` (`run.sh --continue`) are appended to it. |
+| `sandboxed_command` | Optional. Used instead of `command` with `run.sh --bash-sandbox` (or `BASH_SANDBOX=1`): the same tool with its own sandbox for the commands it runs, on top of the container. Without it, `--bash-sandbox` is refused for this harness. See `claude/claude-sandboxed`. |
 | `state` | Directories mounted read-write: login, session history, caches. Created on the host if missing. |
 | `config` | Files or directories mounted read-only on top of `state`, unless `--allow-config`. Anything that makes the tool run code or change behavior the next time you use it natively on the host belongs here. Missing entries are skipped. |
 | `staged` | Files the tool rewrites on every start. With `--allow-config` they're mounted read-write; otherwise they're mounted read-only and copied into the container, so edits are discarded on exit. Created on the host if missing (`{}` for `.json`, empty otherwise). |

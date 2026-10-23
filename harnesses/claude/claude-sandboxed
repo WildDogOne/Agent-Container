@@ -1,0 +1,107 @@
+#!/bin/sh
+# Starts Claude Code with its own Bash sandbox (bubblewrap + a filtering proxy) switched
+# on, on top of the container. harness.conf's `sandboxed_command`, i.e. what
+# entrypoint.sh runs for `run.sh --bash-sandbox`. Installed to /usr/local/bin by
+# install.sh. Arguments are passed through to claude.
+#
+# Why a second layer: squid only filters what honors the proxy env vars, so a Bash
+# command that ignores them (curl --noproxy, raw sockets) reaches the network directly,
+# and ~/.claude.json (MCP config, often with tokens) is plain readable by any command.
+# Inside Claude Code's sandbox every Bash command gets its own network namespace with
+# Claude Code's proxy as the only way out, and the paths below can't be read at all.
+# File tools and MCP servers aren't sandboxed by it; the permission rules below cover
+# the file tools.
+#
+# The settings are generated per session rather than baked in, so they follow this
+# session's squid allowlist (including a --allow-list override) and the variables
+# passed in with run.sh --env-file. Passed via --settings, not ~/.claude/settings.json,
+# so the host's native claude is unaffected (same reason as --permission-mode auto in
+# harness.conf), and so allowUnsandboxedCommands: false can't be undone by a project's
+# .claude/settings.json.
+set -eu
+
+settings_dir=/tmp/agentcontainer
+settings="$settings_dir/claude-sandbox-settings.json"
+mkdir -p "$settings_dir"
+rm -f "$settings"
+
+# Normal mode: Claude Code mounts a fresh /proc in every sandboxed command, and its
+# seccomp helper (apply-seccomp, which blocks Unix sockets) mounts one more inside that.
+# Under sysbox the kernel refuses a fresh /proc (sysbox overmounts parts of the
+# container's own), so neither can work there. Nested mode instead:
+# - enableWeakerNestedSandbox: bind the container's /proc instead of a fresh one. Sysbox
+#   only allows that bind for a process with its own ipc/uts/cgroup namespaces too,
+#   which Claude Code doesn't create - bwrap-sysbox-shim adds them when
+#   AGENTCONTAINER_BWRAP_EXTRA_NS=1 (exported below, so Claude Code's bwrap calls see it).
+# - allowAllUnixSockets: the only setting that skips apply-seccomp. Unix sockets are
+#   then reachable by path, so the root-equivalent ones (the nested dockerd/containerd)
+#   are denied as files instead, below; the network namespace already keeps abstract
+#   sockets apart.
+# - sandboxed commands may create user namespaces (blocking that also needs
+#   apply-seccomp or a fresh /proc). The mounts bwrap sets up are locked in any such
+#   namespace, so this can't unmask the denied files or make read-only paths writable.
+# Both probes mirror the namespaces and /proc mount Claude Code itself uses, so a
+# probe that passes means its commands will start. Neither working -> refuse: a session
+# the user asked to be sandboxed must not silently run without it.
+probe() {
+  bwrap --new-session --die-with-parent --unshare-net --ro-bind / / --dev /dev \
+    --unshare-pid --unshare-user "$@" true 2>/dev/null
+}
+nested=false
+if probe --proc /proc; then
+  echo "claude-sandboxed: Bash sandbox on" >&2
+elif AGENTCONTAINER_BWRAP_EXTRA_NS=1 probe --bind /proc /proc; then
+  nested=true
+  export AGENTCONTAINER_BWRAP_EXTRA_NS=1
+  echo "claude-sandboxed: Bash sandbox on (nested mode for sysbox, see README)" >&2
+else
+  echo "claude-sandboxed: bubblewrap doesn't work in this container, refusing to start without the Bash sandbox" >&2
+  echo "claude-sandboxed: run without --bash-sandbox, or check: bwrap --unshare-all --ro-bind / / true" >&2
+  exit 1
+fi
+
+# squid's list (see image/squid.conf) -> allowedDomains. A leading "." means the domain
+# and every subdomain in squid, so it becomes both "x.com" and "*.x.com". Ports are
+# dropped: the sandbox filters by host only, squid still checks the port.
+domains=$(sed 's/\r$//; s/#.*//; s/[[:space:]]//g; s/:[0-9]*$//' /etc/squid/allowed-domains.txt \
+  | grep -v '^$' | sort -u \
+  | jq -R -s 'split("\n") | map(select(length > 0)) | map(if startswith(".") then (.[1:], "*" + .) else . end) | unique')
+
+# Variables from run.sh --env-file (validated there and in entrypoint.sh): meant for MCP
+# servers, which Claude Code starts outside the sandbox, so Bash doesn't need them.
+env_vars=$(printf '%s' "${AGENTCONTAINER_ENV_KEYS:-}" \
+  | jq -R -s 'split(",") | map(select(length > 0)) | map({name: ., mode: "deny"})')
+
+jq -n \
+  --argjson domains "$domains" \
+  --argjson env_vars "$env_vars" \
+  --argjson nested "$nested" \
+  --arg settings_dir "$settings_dir" \
+  '{
+    sandbox: ({
+      enabled: true,
+      failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
+      enableWeakerNestedSandbox: $nested,
+      filesystem: {
+        # The Docker/containerd sockets too, in both modes: root on the nested dockerd
+        # means a container with all files of this one mounted and its own network.
+        # Seccomp already blocks Unix sockets in normal mode; this also covers nested.
+        denyRead: ["~/.claude.json", "~/.claude.json.*", "~/.claude/.credentials.json",
+                   "/run/docker.sock", "/run/docker", "/run/containerd"],
+        denyWrite: [$settings_dir]
+      },
+      network: ({ allowedDomains: $domains } + (if $nested then { allowAllUnixSockets: true } else {} end))
+    } + (if ($env_vars | length) > 0 then { credentials: { envVars: $env_vars } } else {} end)),
+    permissions: {
+      deny: [
+        "Read(~/.claude.json)",
+        "Read(~/.claude.json.*)",
+        "Read(~/.claude/.credentials.json)",
+        "Edit(/\($settings_dir)/**)"
+      ]
+    }
+  }' > "$settings"
+chmod 444 "$settings"
+
+exec claude --settings "$settings" "$@"

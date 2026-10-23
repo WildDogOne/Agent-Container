@@ -1,0 +1,14 @@
+#!/bin/sh
+# Installed as /usr/local/bin/bwrap, ahead of the real /usr/bin/bwrap on PATH, which is
+# where Claude Code looks bwrap up. Passes everything through unchanged, except when
+# claude-sandboxed sets AGENTCONTAINER_BWRAP_EXTRA_NS=1 (sysbox only, see there): then it
+# also gives the sandboxed command its own IPC, UTS and cgroup namespaces.
+#
+# Why: sysbox intercepts mount() inside the container and only lets a process bind
+# /proc when it looks like a nested container, i.e. has all of those namespaces of its
+# own. Claude Code only unshares user, pid and net, so under sysbox its `--bind /proc
+# /proc` fails with EINVAL and no sandboxed command can start. Only ever adds isolation.
+if [ "${AGENTCONTAINER_BWRAP_EXTRA_NS:-0}" = "1" ]; then
+  exec /usr/bin/bwrap --unshare-ipc --unshare-uts --unshare-cgroup-try "$@"
+fi
+exec /usr/bin/bwrap "$@"

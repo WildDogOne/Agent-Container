@@ -28,3 +28,12 @@ EXTRA_MOUNTS=(
 # own GID and only applies together with CONTAINER_UID.
 # CONTAINER_UID=1234
 # CONTAINER_GID=1234
+
+# Start every session as if --bash-sandbox was passed: the harness's sandboxed_command
+# (for Claude Code, its own Bash sandbox on top of the container). See README.md.
+# BASH_SANDBOX=1
+
+# Docker env file passed into every session (--env-file overrides it), e.g. tokens your
+# MCP servers reference as ${VAR} instead of keeping them in ~/.claude.json. Keep it
+# outside the repo and chmod 600. See README.md.
+# ENV_FILE="$HOME/.config/agentcontainer.env"

@@ -154,6 +154,24 @@ fi
 # which shouldn't apply to `claude` run natively. Forwarded args come after it, so e.g.
 # `run.sh --permission-mode manual` still overrides it (last one wins).
 harness_command="$(sed -n 's/^command=//p' /etc/agentcontainer/harness.conf | tail -n 1)"
+
+# run.sh --bash-sandbox: start the harness's `sandboxed_command` instead (for Claude
+# Code: the same command with its own Bash sandbox on top). Refuses to start rather
+# than fall back to `command` when the harness has none - the user asked for the
+# sandbox, so silently running without it would be the wrong failure. A full command
+# override (`run.sh --bash-sandbox bash`) bypasses the harness command entirely, so the
+# flag can't apply there; say so instead of pretending it did.
+if [ "${AGENTCONTAINER_BASH_SANDBOX:-0}" = "1" ]; then
+  harness_command="$(sed -n 's/^sandboxed_command=//p' /etc/agentcontainer/harness.conf | tail -n 1)"
+  if [ -z "$harness_command" ]; then
+    echo "entrypoint.sh: --bash-sandbox passed, but this harness has no sandboxed_command in harness.conf" >&2
+    exit 1
+  fi
+  if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    echo "entrypoint.sh: --bash-sandbox only applies to the harness's own command, not to '$1'" >&2
+  fi
+fi
+
 if [ "$#" -eq 0 ]; then
   set -- zsh -lc "exec $harness_command"
 elif [ "${1#-}" != "$1" ]; then
@@ -172,4 +190,17 @@ fi
 # sudo): that would force HOME back to dev's passwd-registered /home/dev, undoing the
 # HOST_HOME alignment above. --preserve-env=HOME instead carries this script's own
 # $HOME (just set above) through to the dev session.
-exec sudo -u dev --preserve-env=HOME,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy -- "$@"
+#
+# run.sh --env-file: docker sets those variables on this process, and run.sh lists their
+# names in AGENTCONTAINER_ENV_KEYS so they survive sudo's env reset too (e.g. MCP server
+# tokens referenced as ${VAR} in the harness's config). The names are checked again here
+# rather than trusted: they end up in sudo's command line.
+preserve_env=HOME,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy
+if [ -n "${AGENTCONTAINER_ENV_KEYS:-}" ]; then
+  if ! printf '%s' "$AGENTCONTAINER_ENV_KEYS" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*$'; then
+    echo "entrypoint.sh: invalid AGENTCONTAINER_ENV_KEYS: $AGENTCONTAINER_ENV_KEYS" >&2
+    exit 1
+  fi
+  preserve_env="$preserve_env,$AGENTCONTAINER_ENV_KEYS,AGENTCONTAINER_ENV_KEYS"
+fi
+exec sudo -u dev --preserve-env="$preserve_env" -- "$@"

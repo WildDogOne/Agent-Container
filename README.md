@@ -160,6 +160,8 @@ harness. They can go anywhere in the argument list:
 | `--allow-container`                      | Mount the **host's** Docker socket instead of running a nested `dockerd`. Root-equivalent, see [below](#docker-inside-the-sandbox). |
 | `--sysbox`                               | Use the `sysbox-runc` runtime instead of `--privileged`. See [docs/sysbox.md](docs/sysbox.md).                                      |
 | `--allow-config`                         | Let the harness change its config on the host. Read-only by default, see [below](#what-the-container-can-see).                      |
+| `--bash-sandbox`                         | Start the harness's `sandboxed_command`. For Claude Code: its own Bash sandbox on top of the container, see [below](#bash-sandbox).   |
+| `--env-file FILE`                        | Pass the variables in `FILE` (docker env file) into the session, e.g. MCP tokens. See [below](#secrets-for-mcp-servers).            |
 
 ```sh
 run.sh --mount ~/data --mount ~/models:/models:ro --continue
@@ -175,7 +177,7 @@ Per-machine settings live in `config/`. Each file there is gitignored and has a 
 |---|---|---|
 | `config/allowed-domains.txt` | `build.sh` | Extra domains to allow, on top of the defaults. See [Network egress](#network-egress). |
 | `config/extra-setup.sh` | `build.sh` | Extra packages or tools baked into the image. See [Customizing the image](#customizing-the-image). |
-| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`). |
+| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`), Bash sandbox by default (`BASH_SANDBOX=1`), env file (`ENV_FILE=`). |
 | `config/run.local.ps1` | `run.ps1` | The same for Windows. |
 
 **Rebuild with `./build.sh` after changing anything in `image/`, `harnesses/`,
@@ -340,6 +342,8 @@ own file (and rebuild) when a workflow needs a new host. For a single session, u
 
 **This guards against accidents. It is not a hard boundary.** There are no iptables
 rules, so a tool that ignores proxy settings can still reach the network directly.
+For Claude Code, `--bash-sandbox` closes that gap for shell commands, see
+[Bash sandbox](#bash-sandbox).
 
 Blocked requests are logged in `/tmp/squid-access.log` inside the container. The file
 belongs to root, so read it with `sudo tail /tmp/squid-access.log` when something fails
@@ -348,6 +352,85 @@ to download.
 `--host-network` swaps isolation for connectivity, for example behind a corporate VPN
 that only routes the host's own traffic. Only use it when the bridge network can't reach
 the internet.
+
+## Bash sandbox
+
+`run.sh --bash-sandbox` (or `BASH_SANDBOX=1` in `config/run.local.sh`) starts the
+harness's `sandboxed_command` from `harness.conf` instead of its `command`. Only Claude
+Code has one so far: `claude-sandboxed`, which turns on Claude Code's own
+[sandbox](https://docs.claude.com/en/docs/claude-code/sandboxing) for the shell commands
+it runs. Every Bash command then runs in bubblewrap, inside the container:
+
+- **Network:** each command gets its own network namespace. The only way out is Claude
+  Code's proxy, which allows the same domains as squid (generated from this session's
+  list, so `--allow-list` applies too) and then tunnels through squid itself. Anything
+  else waits for your OK or is refused, depending on the permission mode. A tool that
+  ignores proxy settings has no network at all instead of a direct route.
+- **Secrets:** `~/.claude.json` and `~/.claude/.credentials.json` (the login token)
+  can't be read by shell commands, and Claude Code's file tools are denied them too.
+  Variables from `--env-file` are removed from shell commands' environment.
+- **No way around it:** `allowUnsandboxedCommands` is off, so Claude can't rerun a
+  failing command outside the sandbox. `sudo` doesn't work in sandboxed commands either.
+
+Claude Code itself and the MCP servers it starts aren't sandboxed by this: they still
+read their config and tokens normally.
+
+The settings are generated at startup and passed with `--settings`, so neither your
+`~/.claude/settings.json` nor the host's native `claude` change. If bubblewrap doesn't
+work at all, `claude-sandboxed` refuses to start rather than run unsandboxed.
+
+**Under `--sysbox`** it works too, in a nested mode that `claude-sandboxed` picks by
+itself (it says so when it starts). Sysbox refuses a fresh `/proc` mount, and only lets
+a process bind the container's own `/proc` when it has its own IPC, UTS and cgroup
+namespaces, which Claude Code doesn't create. So in nested mode:
+
+- sandboxed commands see the container's `/proc` (Claude Code's
+  `enableWeakerNestedSandbox`), i.e. the container's other processes;
+- a small `bwrap` wrapper in the image (`harnesses/claude/bwrap-sysbox-shim`) adds the
+  missing namespaces. It only ever adds isolation, and does nothing outside nested mode;
+- Claude Code's seccomp filter for Unix sockets can't run (it needs a fresh `/proc`), so
+  sockets are reachable by path. The nested Docker daemon's sockets are denied as files
+  instead, so `docker` doesn't work in sandboxed commands in either mode. Other sockets,
+  such as a forwarded SSH agent, do work in nested mode;
+- sandboxed commands may create user namespaces of their own. The sandbox's mounts are
+  locked inside them: unmasking the denied files or remounting read-only paths writable
+  is refused (tested).
+
+Secrets, network and write restrictions behave the same as in normal mode.
+
+What it costs: tools that need raw network access (`nmap`, `ping`) don't work in a
+sandboxed session, and every new domain needs your OK or an allowlist entry. Without
+`--bash-sandbox` nothing changes.
+
+### Secrets for MCP servers
+
+MCP servers configured in `~/.claude.json` often carry tokens in plaintext there, and
+the file is copied into every session. Claude Code expands `${VAR}` in MCP server
+config, so the tokens can live in an env file instead:
+
+```json
+"headers": { "Authorization": "Bearer ${ELASTIC_TOKEN}" }
+```
+
+```sh
+# ~/.config/agentcontainer.env (chmod 600), docker env file format
+ELASTIC_TOKEN=...
+JIRA_PERSONAL_TOKEN=...
+```
+
+```sh
+run.sh --env-file ~/.config/agentcontainer.env     # or ENV_FILE=... in config/run.local.sh
+```
+
+Expansion works in `env`, `args`, `command`, `url` and `headers`, for servers in
+`~/.claude.json` as well as `.mcp.json`. Use your own names: Claude Code leaves
+well-known credential variables (such as `ANTHROPIC_API_KEY`) empty in a remote
+server's `url` and `headers` instead of expanding them.
+
+The variables reach Claude Code and the MCP servers it starts. With `--bash-sandbox`,
+shell commands don't see them. Names the sandbox itself relies on (`HTTP_PROXY` and
+friends, `HOME`, `HOST_*`, `SQUID_*`, `AGENTCONTAINER_*`, ...) are refused, so an env file
+can't quietly switch off the allowlist.
 
 ## Docker inside the sandbox
 

@@ -98,6 +98,8 @@ $allowInternet = $false
 $allowContainer = $false
 $allowConfig = $false
 $sysbox = $false
+$cliBashSandbox = $false
+$cliEnvFile = ''
 $cliMounts = New-Object System.Collections.Generic.List[string]
 $forward = New-Object System.Collections.Generic.List[string]
 
@@ -111,6 +113,11 @@ while ($i -lt $cliArgs.Count) {
     '--allow-container' { $allowContainer = $true; $i++; continue }
     '--allow-config'    { $allowConfig = $true; $i++; continue }
     '--sysbox'          { $sysbox = $true; $i++; continue }
+    '--bash-sandbox'    { $cliBashSandbox = $true; $i++; continue }
+    '--env-file' {
+      if ($i + 1 -ge $cliArgs.Count) { Fail '--env-file requires a path argument' }
+      $cliEnvFile = [string]$cliArgs[$i + 1]; $i += 2; continue
+    }
     '--harness' {
       if ($i + 1 -ge $cliArgs.Count) { Fail '--harness requires a harness name' }
       $cliHarness = [string]$cliArgs[$i + 1]; $i += 2; continue
@@ -158,6 +165,8 @@ $HARNESS = $env:HARNESS
 if (-not $HARNESS) { $HARNESS = 'claude' }
 $CONTAINER_UID = $env:CONTAINER_UID
 $CONTAINER_GID = $env:CONTAINER_GID
+$BASH_SANDBOX = $env:BASH_SANDBOX
+$ENV_FILE = $env:ENV_FILE
 $localConfig = Join-Path $PSScriptRoot 'config\run.local.ps1'
 if (Test-Path $localConfig) { . $localConfig }
 
@@ -183,6 +192,39 @@ function Split-HarnessList([string]$value) {
 $harnessState = @(Split-HarnessList (Get-HarnessConf 'state'))
 $harnessStaged = @(Split-HarnessList (Get-HarnessConf 'staged'))
 $configRoPaths = @(Split-HarnessList (Get-HarnessConf 'config')) + @($EXTRA_CONFIG_RO_PATHS)
+
+# See run.sh: --bash-sandbox or BASH_SANDBOX=1 starts the harness's sandboxed_command.
+$bashSandbox = $false
+$bashSandboxDesc = 'off (default; pass --bash-sandbox or set $BASH_SANDBOX = 1 to enable)'
+if ($cliBashSandbox -or [string]$BASH_SANDBOX -eq '1') {
+  $sandboxedCommand = Get-HarnessConf 'sandboxed_command'
+  if (-not $sandboxedCommand) { Fail "--bash-sandbox: harness '$harnessName' has no sandboxed_command in its harness.conf" }
+  $bashSandbox = $true
+  if ($cliBashSandbox) { $bashSandboxDesc = "ON (--bash-sandbox passed): $sandboxedCommand" }
+  else { $bashSandboxDesc = "ON (BASH_SANDBOX=1): $sandboxedCommand" }
+}
+
+# See run.sh: --env-file, else ENV_FILE. Docker parses the file; the names are collected
+# for entrypoint.sh (sudo) and checked against the variables the sandbox relies on.
+$envFile = $cliEnvFile
+if (-not $envFile) { $envFile = [string]$ENV_FILE }
+$envKeys = New-Object System.Collections.Generic.List[string]
+if ($envFile) {
+  $envFile = Resolve-HostPath $envFile
+  if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) { Fail "env file not found: $envFile" }
+  foreach ($line in [IO.File]::ReadAllLines($envFile)) {
+    $line = $line.TrimEnd("`r")
+    if ($line -match '^\s*(#|$)') { continue }
+    $key = $line.Split('=')[0]
+    if ($key -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Fail "${envFile}: invalid variable name '$key'" }
+    if ($key -cmatch '^(HOME|PATH|USER|SHELL|SUDO_.*|HOST_.*|AGENTCONTAINER_.*|SQUID_.*|ALLOW_CONTAINER)$' -or
+        $key -match '^(HTTP|HTTPS|NO|ALL)_PROXY$') {
+      Fail "${envFile}: '$key' is reserved by the sandbox and can't be set from an env file"
+    }
+    $envKeys.Add($key)
+  }
+}
+$envKeysJoined = $envKeys -join ','
 
 # harness.conf paths are relative to the home directory, with forward slashes.
 function Get-HostHomePath([string]$rel) { return (Join-Path $hostHome ($rel -replace '/', '\')) }
@@ -216,10 +258,16 @@ if ($showHelp) {
   if ($cliHarness) { $harnessDesc += ' (--harness passed)' }
   $available = (Get-ChildItem -Directory (Join-Path $PSScriptRoot 'harnesses') | ForEach-Object { $_.Name }) -join ' '
   $defaultCommand = Get-HarnessConf 'command'
+  if ($envFile) {
+    $envDesc = $envKeysJoined
+    if (-not $envDesc) { $envDesc = 'no variables' }
+    $envDesc = "$envFile ($envDesc)"
+  } else { $envDesc = 'none (pass --env-file or set $ENV_FILE to add one)' }
 
   @"
 Usage: run.ps1 [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
                [--allow-container] [--allow-config] [--sysbox] [--mount <path|host:container[:ro]>]...
+               [--bash-sandbox] [--env-file <path>]
                [-h|--help] [harness-args... | command...]
 
 Windows/Docker Desktop version of run.sh - same flags, see run.sh --help or README.md
@@ -241,6 +289,8 @@ Effective config on this machine:
   Docker socket:  $sockDesc
   Harness config: $cfgDesc
   dev UID:GID:    $remapDesc
+  Bash sandbox:   $bashSandboxDesc
+  Env file:       $envDesc
   Mounts:
     $projectDir -> $projectTarget
 "@ | Write-Host
@@ -344,6 +394,12 @@ if ($allowInternet) { $dockerArgs.AddRange([string[]]@('-e', 'SQUID_ALLOW_INTERN
 # is a path inside the VM, not on Windows, so it can't be Test-Path'ed here.
 if ($allowContainer) {
   $dockerArgs.AddRange([string[]]@('-v', '/var/run/docker.sock:/var/run/docker.sock', '-e', 'ALLOW_CONTAINER=1'))
+}
+
+if ($bashSandbox) { $dockerArgs.AddRange([string[]]@('-e', 'AGENTCONTAINER_BASH_SANDBOX=1')) }
+if ($envFile) {
+  $dockerArgs.AddRange([string[]]@('--env-file', $envFile))
+  if ($envKeysJoined) { $dockerArgs.AddRange([string[]]@('-e', "AGENTCONTAINER_ENV_KEYS=$envKeysJoined")) }
 }
 
 foreach ($m in @($EXTRA_MOUNTS)) { Add-MountSpec ([string]$m) 'config\run.local.ps1' }
