@@ -486,10 +486,11 @@ MCP server *configuration* needs nothing here. The harness's config (e.g.
 as long as the command they run exists in the image.
 
 **One-off MCP servers (Claude Code).** For a server you only need now and then, such as
-one with broader credentials, skip `~/.claude.json`. Put it in its own config file, e.g.
-`~/.claude/graph-review.mcp.json`, with `chmod 600` since it holds the secret. Keep it out of
-git, for example with an entry in `.git/info/exclude`. Then load it for a single
-session with Claude Code's `--mcp-config`:
+one with broader credentials, skip `~/.claude.json`. Put it in its own config file with
+`chmod 600`, since it holds the secret, e.g. `~/.config/mcp/graph-review.mcp.json`.
+Keep it outside `~/.claude` (mounted read-write into every session), outside the
+project, and outside any `EXTRA_MOUNTS`, so no other session can read it. Then mount it
+and load it for a single session with Claude Code's `--mcp-config`:
 
 ```json
 {
@@ -509,19 +510,21 @@ session with Claude Code's `--mcp-config`:
 ```
 
 ```sh
-run.sh --mount "$F:$F:ro" --mcp-config "$HOME/.claude/graph-review.mcp.json" --allowedTools mcp__graph-review
+F="$HOME/.config/mcp/graph-review.mcp.json"
+run.sh --mount "${F}:${F}:ro" --mcp-config "$F" --allowedTools mcp__graph-review
 ```
 
 - `run.sh` handles `--mount` itself and forwards the `-` flags to `claude`.
 - The servers in `~/.claude.json` still load alongside this one.
 - `--allowedTools` is optional: `mcp__<server>` with no tool name allows every tool of
   that server without a prompt. Only use it for read-only tools.
-- Use `$HOME` rather than `~` in the `--mount` value: the shell doesn't expand a `~` that
-  comes after a `:`.
+- Use `$HOME` rather than `~` in `F`: the shell doesn't expand a `~` inside quotes or
+  after a `:`. Keep the braces in `${F}:`: zsh would read `$F:r` as a modifier that
+  strips the file extension.
 - The next plain `run.sh` doesn't have the server, and nothing is written to the host's
   config.
-- The secret is readable inside that session, but only in sessions where you mount the
-  file.
+- The secret is readable only in sessions where you mount the file, but there by
+  everything, including shell commands under `--bash-sandbox`.
 - With `run.ps1`, pass the translated container path to `--mcp-config`, e.g.
   `/c/Users/me/...`.
 
