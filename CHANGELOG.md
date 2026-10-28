@@ -7,6 +7,22 @@ the change takes effect.
 
 ## Unreleased
 
+### Fixed
+
+- Hermes harness: starting a second `run.sh --harness hermes` session while one is
+  already running failed with `Error: Gateway connection failed; no local fallback`.
+  Hermes runs one gateway daemon per Hermes home, discovered through
+  `gateway.lock`/`gateway.sock` at the home's root and dialed over loopback TCP;
+  with `~/.hermes` bind-mounted into every container, session 2 found session 1's
+  gateway inside another network namespace and couldn't reach it. `hermes` in the
+  container is now a wrapper that runs each session with a container-local
+  `~/.hermes-session` home, symlinking everything but the gateway runtime files,
+  `state.db` and `logs` from the shared `~/.hermes` - config, `.env`, `auth.json`,
+  skills, hooks, cron, memories and transcripts stay shared; each container runs
+  its own gateway with its own session store (Hermes enforces one writer per
+  `state.db`), so `--continue` only sees the sessions of that container.
+  **rebuild** (`harnesses/hermes/`)
+
 ### Added
 
 - `run.sh --bash-sandbox` (or `BASH_SANDBOX=1` in `config/run.local.sh`): starts the

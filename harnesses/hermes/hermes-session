@@ -1,0 +1,41 @@
+#!/bin/sh
+# Installed as /usr/local/bin/hermes (see install.sh). Starts Hermes with a
+# container-local Hermes home so every container session runs its own gateway.
+#
+# Hermes runs exactly one gateway daemon per Hermes home: the rendezvous files
+# (gateway.lock, gateway.sock, gateway.pid, gateway_state.json) sit at the
+# home's root, and clients dial the gateway's loopback TCP endpoint. ~/.hermes
+# is bind-mounted into every session, so with two sessions up the second one
+# discovers the first container's gateway through the shared control socket and
+# then fails to reach its 127.0.0.1 endpoint from a different network
+# namespace: "Error: Gateway connection failed; no local fallback".
+#
+# So: keep only the gateway runtime files per-container (in $HOME/.hermes-session,
+# which is not mounted and dies with the container), and symlink everything else
+# from the shared host home. Config, secrets, auth, skills, hooks, cron, memories
+# and session transcripts stay shared; each container gets its own gateway and its
+# own session store (Hermes enforces one writer per state.db) and logs.
+# flock-based lockfiles (.env.lock, auth.lock, ...) are shared too, so they still
+# coordinate across containers.
+set -eu
+
+shared="${HERMES_SHARED_HOME:-$HOME/.hermes}"
+home="${HERMES_SESSION_HOME:-$HOME/.hermes-session}"
+
+mkdir -p "$home"
+chmod 700 "$home"
+
+for p in "$shared"/* "$shared"/.[!.]*; do
+    [ -e "$p" ] || continue
+    name="${p##*/}"
+    case "$name" in
+        gateway.lock|gateway.pid|gateway.sock|gateway.sock.path|gateway_state.json|gateway-starts.log|\
+        state.db|state.db-wal|state.db-shm|logs)
+            continue ;;
+    esac
+    [ -e "$home/$name" ] || ln -s "$p" "$home/$name"
+done
+
+HERMES_HOME="$home"
+export HERMES_HOME
+exec /opt/hermes/hermes-agent/.hermes/bin/hermes "$@"

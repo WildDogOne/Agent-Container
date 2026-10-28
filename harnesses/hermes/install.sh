@@ -17,7 +17,11 @@ curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scri
 # Hermes refuses to run an install owned by another user; dev is UID/GID 1000 in the
 # image (entrypoint.sh re-chowns `owned` paths if dev gets remapped to a different ID).
 chown -R 1000:1000 /opt/hermes
-ln -sf /opt/hermes/hermes-agent/.hermes/bin/hermes /usr/local/bin/hermes
+# /usr/local/bin/hermes is the per-session wrapper (hermes-session), not the raw
+# launcher: each container session gets its own gateway home instead of
+# colliding over the shared ~/.hermes rendezvous files. See hermes-session.
+cp /tmp/harness/hermes-session /usr/local/bin/hermes
+chmod 755 /usr/local/bin/hermes
 # Only /opt/hermes itself has a ready environment at this point; a session home prepares
 # its own on first launch (into ~/.hermes/installs, a few hundred MB).
-HERMES_HOME=/opt/hermes hermes --version
+HERMES_HOME=/opt/hermes /opt/hermes/hermes-agent/.hermes/bin/hermes --version

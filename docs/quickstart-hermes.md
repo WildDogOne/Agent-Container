@@ -99,6 +99,11 @@ hermescli bash     # a plain shell instead
 
 The same commands work in PowerShell through the `hermescli` function.
 
+You can run several `hermescli` sessions at once (Hermes runs one gateway daemon
+per Hermes home, and each container gets its own private gateway inside the
+otherwise-shared `~/.hermes`). Inside a `hermescli bash` session, `hermes` is the
+same wrapper, so plain-shell sessions get a private gateway too.
+
 ## How a session works
 
 ```mermaid
