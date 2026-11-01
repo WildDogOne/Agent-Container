@@ -101,7 +101,19 @@ jq -n \
         "Read(~/.claude.json.*)",
         "Read(~/.claude/.credentials.json)",
         "Read(~/.claude/backups/**)",
-        "Edit(/\($settings_dir)/**)"
+        "Edit(/\($settings_dir)/**)",
+        # Project-level settings live in $PWD, which is writable by design, and the
+        # ro mounts cannot cover them. Claude Code trusts them on *native* host runs
+        # in this same folder later (hooks, MCP servers) - the exact vector the ro
+        # config mounts exist for, so deny the writes here. Deny rules merge and
+        # win, and these come from --settings, so a project settings file cannot
+        # undo them. Legitimate config edits go through the host-side claude or a
+        # session started without the sandbox. Not covered (yet): project
+        # .claude/commands|agents|hooks|skills subdirs, which are also executed -
+        # blocking those outright breaks normal work, left to the permission mode.
+        "Edit(./.claude/settings.json)",
+        "Edit(./.claude/settings.local.json)",
+        "Edit(./.mcp.json)"
       ]
     }
   }' > "$settings"

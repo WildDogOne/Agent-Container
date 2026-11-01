@@ -140,11 +140,13 @@ per-machine config like `run.local.sh`, copy `config\run.local.ps1.example` to
 - **No SSH agent forwarding.** The Windows OpenSSH agent is a named pipe, which can't be
   passed into a Linux container. Inside the container, use HTTPS remotes with `gh auth
   login` instead.
-- **No `--sysbox`.** Sysbox can't be installed in Docker Desktop's VM. `--privileged`
-  only applies inside that VM, not to Windows itself.
+- **No `--sysbox`.** Sysbox can't be installed in Docker Desktop's VM, so `--with-docker`
+  always uses `--privileged` there. That's privileged inside Docker Desktop's VM, not
+  over Windows itself.
 - **`--host-network`** shares the network of Docker Desktop's VM, not the network of
   Windows itself.
-- **`--allow-container`** mounts Docker Desktop's own daemon socket.
+- **`--allow-container`** mounts Docker Desktop's own daemon socket (root-equivalent
+  inside that VM).
 - **Speed.** Mounted Windows folders go through a file-sharing layer that is slow on
   large trees, such as `node_modules` or `.venv`.
 

@@ -6,7 +6,8 @@ set -eu
 npm install -g @anthropic-ai/claude-code
 
 # bubblewrap + socat: what Claude Code's Bash sandbox runs on, on Linux. Used by
-# claude-sandboxed (harness.conf `sandboxed_command`, i.e. run.sh --bash-sandbox).
+# claude-sandboxed (harness.conf `sandboxed_command`, the claude default; opt out with
+# run.sh --no-bash-sandbox).
 apt-get update
 apt-get install -y --no-install-recommends bubblewrap socat
 rm -rf /var/lib/apt/lists/*

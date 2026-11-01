@@ -1,19 +1,23 @@
 # `--sysbox`: isolating the nested Docker daemon
 
-`--privileged` (`run.sh`'s default) is a blunt instrument: it disables essentially every
+`--privileged` (what `run.sh --with-docker` falls back to) is a blunt instrument: it
+disables essentially every
 container security boundary Docker offers, not just the ones the nested `dockerd`
 actually needs. A process that escapes the nested `dockerd` inside a `--privileged`
 container has a well-trodden path to full root on the host.
 
-`run.sh --sysbox` uses the [sysbox-runc](https://github.com/nestybox/sysbox) OCI runtime
-instead. Sysbox gives the container real user-namespace isolation - root inside the
+The [sysbox-runc](https://github.com/nestybox/sysbox) OCI runtime is the good option.
+Sysbox gives the container real user-namespace isolation - root inside the
 container maps to an unprivileged UID on the host - while still letting the nested
 `dockerd` (and other things that normally demand `--privileged`, like systemd) run
-unmodified. `run.sh` only *selects* the runtime (`--runtime=sysbox-runc`); it doesn't
-install it, and refuses to start if `docker info` doesn't list `sysbox-runc`.
+unmodified. `run.sh --with-docker` picks it automatically when `docker info` lists
+`sysbox-runc`; `run.sh --sysbox` forces it (it implies `--with-docker`) and fails if
+sysbox isn't installed. `run.sh` only *selects* the runtime
+(`--runtime=sysbox-runc`); it doesn't install it.
 
-Combining it with `--allow-container` is harmless but pointless: that flag skips the
-nested `dockerd`, so there's nothing left for sysbox to isolate.
+`--sysbox`/`--with-docker` can't be combined with `--allow-container`: that flag uses
+the host's daemon instead of a nested `dockerd`, so there's nothing for sysbox (or
+`--privileged`) to be for - and a host socket needs no privileges at all.
 
 ## Installing sysbox on the host
 

@@ -97,8 +97,10 @@ $allowList = ''
 $allowInternet = $false
 $allowContainer = $false
 $allowConfig = $false
+$withDocker = $false
 $sysbox = $false
 $cliBashSandbox = $false
+$cliNoBashSandbox = $false
 $cliEnvFile = ''
 $noEnvFile = $false
 $cliMounts = New-Object System.Collections.Generic.List[string]
@@ -113,8 +115,10 @@ while ($i -lt $cliArgs.Count) {
     '--allow-internet'  { $allowInternet = $true; $i++; continue }
     '--allow-container' { $allowContainer = $true; $i++; continue }
     '--allow-config'    { $allowConfig = $true; $i++; continue }
+    '--with-docker'     { $withDocker = $true; $i++; continue }
     '--sysbox'          { $sysbox = $true; $i++; continue }
     '--bash-sandbox'    { $cliBashSandbox = $true; $i++; continue }
+    '--no-bash-sandbox' { $cliNoBashSandbox = $true; $i++; continue }
     '--env-file' {
       if ($i + 1 -ge $cliArgs.Count) { Fail '--env-file requires a path argument' }
       $cliEnvFile = [string]$cliArgs[$i + 1]; $i += 2; continue
@@ -142,7 +146,10 @@ if ($allowList) {
   if (-not (Test-Path -LiteralPath $allowList -PathType Leaf)) { Fail "--allow-list file not found: $allowList" }
 }
 if ($sysbox) {
-  Fail '--sysbox is not available with Docker Desktop (sysbox-runc cannot be installed into its VM). Use run.sh on a Linux host for that.'
+  Fail '--sysbox is not available with Docker Desktop (sysbox-runc cannot be installed into its VM). Use run.sh on a Linux host for that. For a nested Docker daemon here, pass --with-docker instead.'
+}
+if ($allowContainer -and $withDocker) {
+  Fail '--allow-container and --with-docker/--sysbox are mutually exclusive (one mounts the host''s Docker daemon, the other runs a nested one)'
 }
 
 $location = Get-Location
@@ -168,9 +175,15 @@ if (-not $HARNESS) { $HARNESS = 'claude' }
 $CONTAINER_UID = $env:CONTAINER_UID
 $CONTAINER_GID = $env:CONTAINER_GID
 $BASH_SANDBOX = $env:BASH_SANDBOX
+$WITH_DOCKER = $env:WITH_DOCKER
 $ENV_FILE = $env:ENV_FILE
 $localConfig = Join-Path $PSScriptRoot 'config\run.local.ps1'
 if (Test-Path $localConfig) { . $localConfig }
+
+if ([string]$WITH_DOCKER -eq '1') { $withDocker = $true }
+if ($allowContainer -and $withDocker) {
+  Fail '--allow-container and --with-docker (or $WITH_DOCKER = 1 in run.local.ps1) are mutually exclusive'
+}
 
 $harnessName = $HARNESS
 if ($cliHarness) { $harnessName = $cliHarness }
@@ -193,17 +206,26 @@ function Split-HarnessList([string]$value) {
 }
 $harnessState = @(Split-HarnessList (Get-HarnessConf 'state'))
 $harnessStaged = @(Split-HarnessList (Get-HarnessConf 'staged'))
+$harnessTmpfs = @(Split-HarnessList (Get-HarnessConf 'tmpfs'))
 $configRoPaths = @(Split-HarnessList (Get-HarnessConf 'config')) + @($EXTRA_CONFIG_RO_PATHS)
 
-# See run.sh: --bash-sandbox or BASH_SANDBOX=1 starts the harness's sandboxed_command.
+# See run.sh: the Bash sandbox (harness's sandboxed_command) is ON by default where the
+# harness defines one; --no-bash-sandbox or $BASH_SANDBOX = 0 turns it off,
+# --bash-sandbox forces it on and fails if the harness has none.
 $bashSandbox = $false
-$bashSandboxDesc = 'off (default; pass --bash-sandbox or set $BASH_SANDBOX = 1 to enable)'
-if ($cliBashSandbox -or [string]$BASH_SANDBOX -eq '1') {
-  $sandboxedCommand = Get-HarnessConf 'sandboxed_command'
+$sandboxedCommand = Get-HarnessConf 'sandboxed_command'
+if ($cliNoBashSandbox -or [string]$BASH_SANDBOX -eq '0') {
+  if ($cliNoBashSandbox) { $bashSandboxDesc = 'off (--no-bash-sandbox passed)' }
+  else { $bashSandboxDesc = 'off (BASH_SANDBOX=0)' }
+} elseif ($cliBashSandbox) {
   if (-not $sandboxedCommand) { Fail "--bash-sandbox: harness '$harnessName' has no sandboxed_command in its harness.conf" }
   $bashSandbox = $true
-  if ($cliBashSandbox) { $bashSandboxDesc = "ON (--bash-sandbox passed): $sandboxedCommand" }
-  else { $bashSandboxDesc = "ON (BASH_SANDBOX=1): $sandboxedCommand" }
+  $bashSandboxDesc = "ON (--bash-sandbox passed): $sandboxedCommand"
+} elseif (-not $sandboxedCommand) {
+  $bashSandboxDesc = "n/a (harness '$harnessName' has no sandboxed_command; plain command)"
+} else {
+  $bashSandbox = $true
+  $bashSandboxDesc = "ON (default; --no-bash-sandbox to disable): $sandboxedCommand"
 }
 
 # See run.sh: --env-file, else ENV_FILE, else the default file if it exists; --no-env-file
@@ -230,7 +252,7 @@ if ($envFile) {
     if ($line -match '^\s*(#|$)') { continue }
     $key = $line.Split('=')[0]
     if ($key -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Fail "${envFile}: invalid variable name '$key'" }
-    if ($key -cmatch '^(HOME|PATH|USER|SHELL|SUDO_.*|HOST_.*|AGENTCONTAINER_.*|SQUID_.*|ALLOW_CONTAINER)$' -or
+    if ($key -cmatch '^(HOME|PATH|USER|SHELL|SUDO_.*|HOST_.*|AGENTCONTAINER_.*|SQUID_.*|ALLOW_CONTAINER|WITH_DOCKER)$' -or
         $key -match '^(HTTP|HTTPS|NO|ALL)_PROXY$') {
       Fail "${envFile}: '$key' is reserved by the sandbox and can't be set from an env file"
     }
@@ -264,7 +286,8 @@ if ($showHelp) {
   elseif ($allowList) { $listDesc = "$allowList (--allow-list passed, overrides image default)" }
   else { $listDesc = 'image default (allowed-domains.txt baked in at build; pass --allow-list to override)' }
   if ($allowContainer) { $sockDesc = "Docker Desktop's /var/run/docker.sock (--allow-container passed - root-equivalent access to its VM and every container in it)" }
-  else { $sockDesc = 'sandboxed nested dockerd only (default; pass --allow-container to use the host daemon)' }
+  elseif ($withDocker) { $sockDesc = 'nested dockerd in the container (--with-docker passed; --privileged, since sysbox is unavailable on Docker Desktop)' }
+  else { $sockDesc = 'none (default; pass --with-docker for a nested dockerd, --allow-container for the host daemon)' }
   if ($allowConfig) { $cfgDesc = 'WRITABLE (--allow-config passed - edits persist on the host)' }
   else { $cfgDesc = "read-only (default; pass --allow-config to let the harness change it)" }
   $harnessDesc = $harnessName
@@ -279,13 +302,14 @@ if ($showHelp) {
 
   @"
 Usage: run.ps1 [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
-               [--allow-container] [--allow-config] [--sysbox] [--mount <path|host:container[:ro]>]...
-               [--bash-sandbox] [--env-file <path> | --no-env-file]
+               [--allow-container | --with-docker] [--allow-config]
+               [--mount <path|host:container[:ro]>]...
+               [--no-bash-sandbox] [--env-file <path> | --no-env-file]
                [-h|--help] [harness-args... | command...]
 
 Windows/Docker Desktop version of run.sh - same flags, see run.sh --help or README.md
 for what each one does. --sysbox is rejected here (sysbox-runc can't run in Docker
-Desktop's VM). Mount specs take Windows host
+Desktop's VM; --with-docker works and falls back to --privileged). Mount specs take Windows host
 paths: C:\data (-> /c/data, read-write), C:\data:/data, C:\data:/data:ro.
 Available harnesses: $available
 
@@ -297,7 +321,7 @@ Effective config on this machine:
   Harness:        $harnessDesc
   Image:          $image
   Network:        $netDesc
-  Runtime:        --privileged (always; --sysbox is rejected on Docker Desktop)
+  Runtime:        $(if ($allowContainer) { 'plain runc, unprivileged (host socket mounted; no nested dockerd to privilege)' } elseif ($withDocker) { '--privileged (--with-docker; sysbox unavailable on Docker Desktop)' } else { 'plain runc, unprivileged (default; pass --with-docker for a nested dockerd)' })
   Allowlist:      $listDesc
   Docker socket:  $sockDesc
   Harness config: $cfgDesc
@@ -309,6 +333,9 @@ Effective config on this machine:
 "@ | Write-Host
   foreach ($entry in $harnessState) {
     Write-Host "    $(Get-HostHomePath $entry) -> $homeTarget/$entry (dev's `$HOME is $homeTarget)"
+  }
+  foreach ($entry in $harnessTmpfs) {
+    Write-Host "    (tmpfs $homeTarget/$entry - container-local, writable, discarded on exit)"
   }
   if ($allowConfig) {
     foreach ($entry in $harnessStaged) { Write-Host "    $(Get-HostHomePath $entry) -> $homeTarget/$entry" }
@@ -372,6 +399,10 @@ $dockerArgs = New-Object System.Collections.Generic.List[string]
 $dockerArgs.AddRange([string[]]@('--rm', '-it', '-w', $projectTarget, '-e', "HOST_HOME=$homeTarget"))
 Add-Bind $projectDir $projectTarget
 foreach ($entry in $harnessState) { Add-Bind (Get-HostHomePath $entry) "$homeTarget/$entry" }
+# See run.sh: harness.conf `tmpfs` paths are container-local tmpfs mounts covering a
+# path inside a state mount (writable in the session, discarded on exit). entrypoint.sh
+# chowns them to dev.
+foreach ($entry in $harnessTmpfs) { $dockerArgs.AddRange([string[]]@('--tmpfs', "$homeTarget/$entry")) }
 
 if ($remapUid) {
   $dockerArgs.AddRange([string[]]@('-e', "HOST_UID=$remapUid", '-e', "HOST_GID=$remapGid"))
@@ -391,9 +422,19 @@ if ($allowConfig) {
   }
 }
 
-# No sysbox on Docker Desktop (refused above), so always --privileged for the nested
-# dockerd. Note this is privileged within Docker Desktop's VM, not over Windows itself.
-$dockerArgs.Add('--privileged')
+# See run.sh: Docker-in-Docker is opt-in (--with-docker). By default there is no nested
+# dockerd and no --privileged at all. No sysbox on Docker Desktop (refused above), so
+# --with-docker always uses --privileged here - note this is privileged within Docker
+# Desktop's VM, not over Windows itself. --allow-container needs no privilege of its own
+# (it just mounts the VM's socket), and entrypoint.sh then skips the nested dockerd.
+# Docker Desktop exposes its daemon socket at /var/run/docker.sock inside its VM, so the
+# Linux-style path is right even from a Windows CLI. -v rather than Add-Bind: the source
+# is a path inside the VM, not on Windows, so it can't be Test-Path'ed here.
+if ($allowContainer) {
+  $dockerArgs.AddRange([string[]]@('-v', '/var/run/docker.sock:/var/run/docker.sock', '-e', 'ALLOW_CONTAINER=1'))
+} elseif ($withDocker) {
+  $dockerArgs.AddRange([string[]]@('--privileged', '-e', 'WITH_DOCKER=1'))
+}
 
 if ($hostNetwork) { $dockerArgs.AddRange([string[]]@('--network', 'host')) }
 
@@ -405,11 +446,8 @@ if ($allowInternet) { $dockerArgs.AddRange([string[]]@('-e', 'SQUID_ALLOW_INTERN
 # Docker Desktop exposes its daemon socket at /var/run/docker.sock inside its VM, so the
 # Linux-style path is right even from a Windows CLI. -v rather than Add-Bind: the source
 # is a path inside the VM, not on Windows, so it can't be Test-Path'ed here.
-if ($allowContainer) {
-  $dockerArgs.AddRange([string[]]@('-v', '/var/run/docker.sock:/var/run/docker.sock', '-e', 'ALLOW_CONTAINER=1'))
-}
-
 if ($bashSandbox) { $dockerArgs.AddRange([string[]]@('-e', 'AGENTCONTAINER_BASH_SANDBOX=1')) }
+elseif ($sandboxedCommand) { $dockerArgs.AddRange([string[]]@('-e', 'AGENTCONTAINER_BASH_SANDBOX=0')) }
 if ($envFile) {
   $dockerArgs.AddRange([string[]]@('--env-file', $envFile))
   if ($envKeysJoined) { $dockerArgs.AddRange([string[]]@('-e', "AGENTCONTAINER_ENV_KEYS=$envKeysJoined")) }

@@ -17,6 +17,14 @@
 # own session store (Hermes enforces one writer per state.db) and logs.
 # flock-based lockfiles (.env.lock, auth.lock, ...) are shared too, so they still
 # coordinate across containers.
+#
+# installs/ is deliberately NOT symlinked either: it's the per-home dependency
+# environment Hermes prepares on first launch and then executes. Symlinking it
+# would let a session plant code in the shared ~/.hermes/installs that the host's
+# native hermes runs on its next launch - the exact vector the read-only config
+# mounts in harness.conf exist for. Each container instead prepares its own
+# installs/ inside the session home (container-local, discarded on exit); the
+# cost is a dependency re-download per session.
 set -eu
 
 shared="${HERMES_SHARED_HOME:-$HOME/.hermes}"
@@ -30,7 +38,7 @@ for p in "$shared"/* "$shared"/.[!.]*; do
     name="${p##*/}"
     case "$name" in
         gateway.lock|gateway.pid|gateway.sock|gateway.sock.path|gateway_state.json|gateway-starts.log|\
-        state.db|state.db-wal|state.db-shm|logs)
+        state.db|state.db-wal|state.db-shm|logs|installs)
             continue ;;
     esac
     [ -e "$home/$name" ] || ln -s "$p" "$home/$name"

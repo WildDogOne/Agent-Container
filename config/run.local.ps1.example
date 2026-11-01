@@ -21,8 +21,13 @@ $EXTRA_MOUNTS = @(
 # $CONTAINER_UID = '1000'
 # $CONTAINER_GID = '1000'
 
-# Start every session as if --bash-sandbox was passed (see run.local.sh.example):
-# $BASH_SANDBOX = 1
+# Start every session as if --with-docker was passed (nested dockerd, --privileged;
+# see run.local.sh.example):
+# $WITH_DOCKER = '1'
+
+# Turn the Bash sandbox off (it's ON by default for harnesses that define a
+# sandboxed_command; see run.local.sh.example):
+# $BASH_SANDBOX = '0'
 
 # Docker env file passed into every session (--env-file overrides it). Defaults to
 # %USERPROFILE%\.config\agentcontainer.env if it exists; 'off' passes none:

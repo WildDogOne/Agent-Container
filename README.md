@@ -21,9 +21,10 @@ the container is gone.
   [`harnesses/`](harnesses/), so adding another needs no changes to the sandbox itself.
 
 **What it isn't:** a hard security boundary. The proxy guards against accidents, but
-a tool that ignores proxy settings can still reach the network, and the container runs
-`--privileged` unless you use [sysbox](docs/sysbox.md). The Windows scripts haven't
-been tested on Windows yet.
+a tool that ignores proxy settings can still reach the network. The container itself runs
+unprivileged by default; only an explicitly requested nested Docker daemon
+([`--with-docker`](#docker-inside-the-sandbox)) needs `--privileged` (or
+[sysbox](docs/sysbox.md)). The Windows scripts haven't been tested on Windows yet.
 
 ## Requirements
 
@@ -32,7 +33,8 @@ been tested on Windows yet.
   where `setup.ps1` installs everything and `build.ps1`/`run.ps1` replace the shell
   scripts.
 - Optional: an SSH agent (`$SSH_AUTH_SOCK`) for git-over-SSH inside the container.
-- Optional: [sysbox](docs/sysbox.md) for `--sysbox`.
+- Optional: [sysbox](docs/sysbox.md), for a nested Docker daemon (`--with-docker`) with
+  real isolation instead of `--privileged`.
 
 You don't need Claude Code (or any other harness) installed on the host; it's
 installed in the image.
@@ -76,9 +78,9 @@ Effective config on this machine:
   Harness:        claude
   Image:          agentcontainer:claude
   Network:        bridge (default; pass --host-network to change)
-  Runtime:        --privileged (default; pass --sysbox to use sysbox-runc instead, if installed)
+  Runtime:        plain runc, unprivileged (default; pass --with-docker for a nested dockerd)
   Allowlist:      image default (allowed-domains.txt baked in at build; pass --allow-list to override)
-  Docker socket:  sandboxed nested dockerd only (default; pass --allow-container to use the host daemon)
+  Docker socket:  none (default; pass --with-docker for a nested dockerd, --allow-container for the host daemon)
   Harness config: read-only (default; pass --allow-config to let the harness change it)
   dev UID:GID:    1000:1000 (your host user)
   Mounts:
@@ -157,10 +159,11 @@ harness. They can go anywhere in the argument list:
 | `--allow-list FILE`                      | Replace the whole egress allowlist with `FILE` (same format as `allowed-domains.txt`).                                              |
 | `--allow-internet`                       | Drop the domain and port allowlists (any host, any port; still proxied and logged). Can't be combined with `--allow-list`.         |
 | `--host-network`                         | Share the host's network namespace instead of the bridge network. For VPNs that block the bridge.                                   |
-| `--allow-container`                      | Mount the **host's** Docker socket instead of running a nested `dockerd`. Root-equivalent, see [below](#docker-inside-the-sandbox). |
-| `--sysbox`                               | Use the `sysbox-runc` runtime instead of `--privileged`. See [docs/sysbox.md](docs/sysbox.md).                                      |
+| `--allow-container`                      | Mount the **host's** Docker socket instead of any nested `dockerd`. Root-equivalent, see [below](#docker-inside-the-sandbox). |
+| `--with-docker`                          | Run a nested `dockerd` in the container (with `--privileged`, or sysbox if installed). Off by default, see [below](#docker-inside-the-sandbox). |
+| `--sysbox`                               | Implies `--with-docker` and forces the `sysbox-runc` runtime instead of `--privileged`. See [docs/sysbox.md](docs/sysbox.md). |
 | `--allow-config`                         | Let the harness change its config on the host. Read-only by default, see [below](#what-the-container-can-see).                      |
-| `--bash-sandbox`                         | Start the harness's `sandboxed_command`. For Claude Code: its own Bash sandbox on top of the container, see [below](#bash-sandbox).   |
+| `--no-bash-sandbox`                      | Don't start the harness's `sandboxed_command` even if it has one. It's the default for harnesses that define one; for Claude Code: its own Bash sandbox on top of the container, see [below](#bash-sandbox). |
 | `--env-file FILE`                        | Pass the variables in `FILE` (docker env file) into the session, e.g. MCP tokens. See [below](#secrets-for-mcp-servers).            |
 | `--no-env-file`                          | Pass no env file, not even the default `~/.config/agentcontainer.env`.                                                              |
 
@@ -178,7 +181,7 @@ Per-machine settings live in `config/`. Each file there is gitignored and has a 
 |---|---|---|
 | `config/allowed-domains.txt` | `build.sh` | Extra domains to allow, on top of the defaults. See [Network egress](#network-egress). |
 | `config/extra-setup.sh` | `build.sh` | Extra packages or tools baked into the image. See [Customizing the image](#customizing-the-image). |
-| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`), Bash sandbox by default (`BASH_SANDBOX=1`), env file (`ENV_FILE=`). |
+| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`), nested Docker by default (`WITH_DOCKER=1`), Bash sandbox off (`BASH_SANDBOX=0`), env file (`ENV_FILE=`). |
 | `config/run.local.ps1` | `run.ps1` | The same for Windows. |
 
 **Rebuild with `./build.sh` after changing anything in `image/`, `harnesses/`,
@@ -208,14 +211,14 @@ flowchart LR
         extramounts["--mount paths /<br/>EXTRA_MOUNTS"]
         allowoverride["--allow-list file"]
         hostsock["host /var/run/docker.sock<br/>(--allow-container only)"]
-        dockerd_host["Docker daemon<br/>(runc --privileged, or sysbox-runc)"]
+        dockerd_host["Docker daemon<br/>(runc)"]
         image[("agentcontainer:NAME")]
     end
 
     subgraph ctr["Container (--rm, one per session)"]
         pid1["entrypoint.sh (PID 1, root)"]
         squid["squid<br/>127.0.0.1:3128"]
-        innerdockerd["nested dockerd<br/>(skipped with --allow-container)"]
+        innerdockerd["nested dockerd<br/>(--with-docker only; --allow-container<br/>mounts the host socket instead)"]
         devcmd["harness / override cmd<br/>as user dev, HOME=HOST_HOME"]
     end
 
@@ -238,7 +241,7 @@ flowchart LR
     allowoverride -. " ro mount, cp over allowlist " .-> squid
     hostsock -. " bind mount " .-> devcmd
     pid1 -- " 1: start " --> squid
-    pid1 -- " 2: start " --> innerdockerd
+    pid1 -- " 2: start (--with-docker only) " --> innerdockerd
     pid1 -- " 3: exec sudo -u dev " --> devcmd
     devcmd -- " HTTP(S)_PROXY " --> squid
     devcmd -- " docker CLI " --> innerdockerd
@@ -252,8 +255,9 @@ flowchart LR
 - **Run time:** `run.sh` reads `harnesses/NAME/harness.conf` and starts a fresh `--rm`
   container with only the mounts listed below.
 - **Inside the container:** `entrypoint.sh` runs as root. It starts squid (the egress
-  proxy), then the nested `dockerd`, then switches to the unprivileged `dev` user to
-  run the harness's default command or the command you gave.
+  proxy) and, only when `--with-docker` was passed, the nested `dockerd`; then switches
+  to the unprivileged `dev` user (no sudo) to run the harness's default command or the
+  command you gave.
 
 ### Repository layout
 
@@ -343,12 +347,11 @@ own file (and rebuild) when a workflow needs a new host. For a single session, u
 
 **This guards against accidents. It is not a hard boundary.** There are no iptables
 rules, so a tool that ignores proxy settings can still reach the network directly.
-For Claude Code, `--bash-sandbox` closes that gap for shell commands, see
-[Bash sandbox](#bash-sandbox).
+For Claude Code, the [Bash sandbox](#bash-sandbox) (on by default) closes that gap for
+shell commands.
 
-Blocked requests are logged in `/tmp/squid-access.log` inside the container. The file
-belongs to root, so read it with `sudo tail /tmp/squid-access.log` when something fails
-to download.
+Blocked requests are logged in `/tmp/squid-access.log` inside the container. Read it with
+`tail /tmp/squid-access.log` when something fails to download.
 
 `--host-network` swaps isolation for connectivity, for example behind a corporate VPN
 that only routes the host's own traffic. Only use it when the bridge network can't reach
@@ -356,9 +359,10 @@ the internet.
 
 ## Bash sandbox
 
-`run.sh --bash-sandbox` (or `BASH_SANDBOX=1` in `config/run.local.sh`) starts the
-harness's `sandboxed_command` from `harness.conf` instead of its `command`. Only Claude
-Code has one so far: `claude-sandboxed`, which turns on Claude Code's own
+By default a session starts the harness's `sandboxed_command` from `harness.conf` instead
+of its `command`, whenever the harness defines one; `run.sh --no-bash-sandbox` (or
+`BASH_SANDBOX=0` in `config/run.local.sh`) switches back to the plain `command`. Only
+Claude Code has one so far: `claude-sandboxed`, which turns on Claude Code's own
 [sandbox](https://docs.claude.com/en/docs/claude-code/sandboxing) for the shell commands
 it runs. Every Bash command then runs in bubblewrap, inside the container:
 
@@ -371,7 +375,7 @@ it runs. Every Bash command then runs in bubblewrap, inside the container:
   `~/.claude.json` (`~/.claude.json.*`, `~/.claude/backups/`) can't be read by shell commands, and Claude Code's file tools are denied them too.
   Variables from `--env-file` are removed from shell commands' environment.
 - **No way around it:** `allowUnsandboxedCommands` is off, so Claude can't rerun a
-  failing command outside the sandbox. `sudo` doesn't work in sandboxed commands either.
+  failing command outside the sandbox. There's no `sudo` in the container at all.
 
 Claude Code itself and the MCP servers it starts aren't sandboxed by this: they still
 read their config and tokens normally.
@@ -400,8 +404,8 @@ namespaces, which Claude Code doesn't create. So in nested mode:
 Secrets, network and write restrictions behave the same as in normal mode.
 
 What it costs: tools that need raw network access (`nmap`, `ping`) don't work in a
-sandboxed session, and every new domain needs your OK or an allowlist entry. Without
-`--bash-sandbox` nothing changes.
+sandboxed session, and every new domain needs your OK or an allowlist entry. With
+`--no-bash-sandbox` (or a harness that has no `sandboxed_command`) nothing changes.
 
 ### Secrets for MCP servers
 
@@ -435,27 +439,29 @@ Expansion works in `env`, `args`, `command`, `url` and `headers`, for servers in
 well-known credential variables (such as `ANTHROPIC_API_KEY`) empty in a remote
 server's `url` and `headers` instead of expanding them.
 
-The variables reach Claude Code and the MCP servers it starts. With `--bash-sandbox`,
-shell commands don't see them. Names the sandbox itself relies on (`HTTP_PROXY` and
+The variables reach Claude Code and the MCP servers it starts. With the Bash sandbox (the
+default for Claude Code), shell commands don't see them. Names the sandbox itself relies
+on (`HTTP_PROXY` and
 friends, `HOME`, `HOST_*`, `SQUID_*`, `AGENTCONTAINER_*`, ...) are refused, so an env file
 can't quietly switch off the allowlist.
 
 ## Docker inside the sandbox
 
-By default the container runs `--privileged` with its own nested `dockerd`. `docker` and
-`docker compose` work inside it. Everything they create stays inside the sandbox and is
-deleted when the container exits. The host's Docker daemon isn't reachable.
+By default there is no Docker at all inside the container: no daemon, no socket, and no
+`--privileged` - the `docker` CLI is inert. `run.sh --with-docker` starts a nested
+`dockerd`, so `docker` and `docker compose` work; everything they create stays inside the
+sandbox and is deleted when the container exits. The host's Docker daemon isn't
+reachable. Nested `dockerd` needs heavy privileges: `run.sh` uses the `sysbox-runc`
+runtime when this host has it registered (real user-namespace isolation, see
+[docs/sysbox.md](docs/sysbox.md)), and `--privileged` otherwise. `--sysbox` forces the
+sysbox runtime and fails if it isn't installed.
 
-`--allow-container` mounts the **host's** `/var/run/docker.sock` instead, and the nested
-daemon isn't started. Containers you start then run on the host daemon as siblings of
-the sandbox, and they outlive it. **This is root-equivalent access to the host**:
+`--allow-container` instead mounts the **host's** `/var/run/docker.sock` (no nested
+daemon, no `--privileged`). Containers you start then run on the host daemon as siblings
+of the sandbox, and they outlive it. **This is root-equivalent access to the host**:
 `docker run -v /:/host ...` is enough to get a root shell there. Only use it for
 sessions that need to drive the host daemon, and only when you trust everything running
-inside.
-
-`--privileged` itself leaves little isolation between the nested `dockerd` and the host.
-`--sysbox` replaces it with user-namespace isolation. It needs a one-time host install:
-see [docs/sysbox.md](docs/sysbox.md).
+inside. It can't be combined with `--with-docker`/`--sysbox`.
 
 ## Customizing the image
 
@@ -524,7 +530,7 @@ run.sh --mount "${F}:${F}:ro" --mcp-config "$F" --allowedTools mcp__graph-review
 - The next plain `run.sh` doesn't have the server, and nothing is written to the host's
   config.
 - The secret is readable only in sessions where you mount the file, but there by
-  everything, including shell commands under `--bash-sandbox`.
+  everything, including shell commands under the Bash sandbox (the default).
 - With `run.ps1`, pass the translated container path to `--mcp-config`, e.g.
   `/c/Users/me/...`.
 
@@ -544,7 +550,7 @@ parents, and activates the first one it finds. Nothing creates the venv for you:
   the first-run steps in [Quick start](#quick-start).
 - **`image agentcontainer:NAME not found`:** run `./build.sh NAME`.
 - **A change to the image has no effect:** rebuild with `./build.sh`.
-- **A download or API call is blocked:** run `sudo tail /tmp/squid-access.log` inside
+- **A download or API call is blocked:** run `tail /tmp/squid-access.log` inside
   the container to see which domain was refused, then use `--allow-list` or add it to
   `config/allowed-domains.txt`.
 - **`cache-miss` on `/reload-plugins`:** make sure you started through `run.sh`, which

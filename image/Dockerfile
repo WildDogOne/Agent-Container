@@ -118,9 +118,14 @@ RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
     && if getent group ubuntu >/dev/null; then groupdel ubuntu; fi \
     && groupadd -g $USER_GID $USERNAME \
     && useradd -m -u $USER_UID -g $USER_GID -s /bin/zsh $USERNAME \
-    && usermod -aG docker $USERNAME \
-    && echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
-    && chmod 0440 /etc/sudoers.d/$USERNAME
+    && usermod -aG docker $USERNAME
+# No sudoers entry for $USERNAME on purpose: the harness and everything it runs (shell
+# commands, MCP servers, build scripts) executes as this user, so a passwordless sudo
+# here would be a ready-made privilege-escalation path from any harness compromise to
+# root inside the container. entrypoint.sh's own `sudo -u dev` drops root->dev and runs
+# as PID 1's root before the drop, so it needs no sudoers rule. Anything that genuinely
+# needs root in the container (none of the supported workflows do) needs a redesign, not
+# a sudo grant.
 
 # uv/uvx: MCP servers registered with a harness (e.g. `uvx mcp-atlassian`) exec uvx
 # directly, so it has to be a real binary on PATH rather than something uvx's own

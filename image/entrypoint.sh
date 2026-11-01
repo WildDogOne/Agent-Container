@@ -84,6 +84,10 @@ done
 
 nohup squid -f /etc/squid/squid.conf -N > /tmp/squid.log 2>&1 &
 sleep 1
+# dev has no sudo in this image (deliberate: no in-container privilege escalation path),
+# and troubleshooting blocked egress means reading squid's logs as dev - make them
+# world-readable instead.
+chmod a+r /tmp/squid-access.log /tmp/squid-cache.log 2>/dev/null || true
 
 # run.sh --allow-container bind-mounts the HOST's own docker.sock at this same path,
 # so starting our own nested dockerd here would just fail to bind it. Instead, give dev
@@ -100,7 +104,10 @@ if [ "${ALLOW_CONTAINER:-0}" = "1" ]; then
     groupadd -g "$sock_gid" "$sock_group"
   fi
   usermod -aG "$sock_group" dev
-else
+elif [ "${WITH_DOCKER:-0}" = "1" ]; then
+  # run.sh --with-docker: nested Docker-in-Docker, explicitly requested (and run.sh
+  # passed --privileged or selected the sysbox runtime for it). Without that flag there
+  # is no daemon at all: the docker CLI in the container has no socket to talk to.
   nohup dockerd --host=unix:///var/run/docker.sock > /tmp/dockerd.log 2>&1 &
   sleep 1
 fi
@@ -131,6 +138,17 @@ export HOME="${HOST_HOME:-/home/dev}"
 mkdir -p "$HOME"
 chown dev:dev "$HOME"
 
+# harness.conf `tmpfs`: run.sh mounts these $HOME-relative paths as container-local
+# tmpfs (writable in the session, never reaches the host - see run.sh). tmpfs mounts
+# come up root-owned 0755, so dev couldn't write them; chown each mount to dev. Only
+# where the mount actually exists - without run.sh (bare `docker run`) there are no
+# tmpfs mounts and the paths may not exist at all.
+for entry in $(sed -n 's/^tmpfs=//p' /etc/agentcontainer/harness.conf | tail -n 1); do
+  if [ -d "$HOME/$entry" ]; then
+    chown dev:dev "$HOME/$entry"
+  fi
+done
+
 # run.sh (without --allow-config) mounts the harness's `staged` files (harness.conf)
 # read-only under /etc/agentcontainer/staged/, at their path relative to $HOME, instead of
 # at $HOME itself. The harness rewrites them on every start (e.g. ~/.claude.json), so a
@@ -155,20 +173,23 @@ fi
 # `run.sh --permission-mode manual` still overrides it (last one wins).
 harness_command="$(sed -n 's/^command=//p' /etc/agentcontainer/harness.conf | tail -n 1)"
 
-# run.sh --bash-sandbox: start the harness's `sandboxed_command` instead (for Claude
-# Code: the same command with its own Bash sandbox on top). Refuses to start rather
-# than fall back to `command` when the harness has none - the user asked for the
-# sandbox, so silently running without it would be the wrong failure. A full command
-# override (`run.sh --bash-sandbox bash`) bypasses the harness command entirely, so the
-# flag can't apply there; say so instead of pretending it did.
-if [ "${AGENTCONTAINER_BASH_SANDBOX:-0}" = "1" ]; then
-  harness_command="$(sed -n 's/^sandboxed_command=//p' /etc/agentcontainer/harness.conf | tail -n 1)"
-  if [ -z "$harness_command" ]; then
-    echo "entrypoint.sh: --bash-sandbox passed, but this harness has no sandboxed_command in harness.conf" >&2
+# Bash sandbox: use the harness's `sandboxed_command` instead of `command` (for Claude
+# Code: the same command with its own Bash sandbox on top). ON by default when the
+# harness defines one; run.sh passes =0 explicitly (--no-bash-sandbox / BASH_SANDBOX=0)
+# or =1 explicitly (--bash-sandbox). =1 with no sandboxed_command refuses to start
+# rather than fall back - the user asked for the sandbox, so silently running without it
+# would be the wrong failure; an unset value (bare `docker run`, no run.sh) just uses it
+# if present. A full command override (`run.sh bash`) bypasses the harness command
+# entirely, so the sandbox can't apply there; say so instead of pretending it did.
+sandboxed_command="$(sed -n 's/^sandboxed_command=//p' /etc/agentcontainer/harness.conf | tail -n 1)"
+if [ "${AGENTCONTAINER_BASH_SANDBOX:-}" = "1" ] || { [ -z "${AGENTCONTAINER_BASH_SANDBOX:-}" ] && [ -n "$sandboxed_command" ]; }; then
+  if [ -z "$sandboxed_command" ]; then
+    echo "entrypoint.sh: Bash sandbox requested, but this harness has no sandboxed_command in harness.conf" >&2
     exit 1
   fi
+  harness_command="$sandboxed_command"
   if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
-    echo "entrypoint.sh: --bash-sandbox only applies to the harness's own command, not to '$1'" >&2
+    echo "entrypoint.sh: the Bash sandbox only applies to the harness's own command, not to '$1'" >&2
   fi
 fi
 

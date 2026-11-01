@@ -45,22 +45,32 @@
 #
 # `--allow-container` (consumed here, not forwarded on) bind-mounts the HOST's own Docker
 # socket (/var/run/docker.sock) into the container, instead of the nested dockerd
-# entrypoint.sh otherwise starts inside the container. Containers started this way are
+# `--with-docker` would otherwise start inside it. Containers started this way are
 # siblings on the host's real Docker daemon, not nested inside the sandbox - they see the
 # host's other containers/images/networks and are not cleaned up when this container
 # exits. Off by default: a container's root-equivalent access to the host's Docker socket
 # is effectively root on the host (bind-mount any host path in, run as any UID). Only pass
 # this for a workflow that specifically needs the host daemon (e.g. driving host
-# `docker compose` services) and that you trust to run inside this sandbox.
+# `docker compose` services) and that you trust to run inside this sandbox. Mutually
+# exclusive with --with-docker/--sysbox (one wants the host daemon, the other a nested
+# one - combining them is almost certainly not what you meant).
 #
-# `--sysbox` (consumed here, not forwarded on) swaps `--privileged` for
-# `--runtime=sysbox-runc` (https://github.com/nestybox/sysbox), which must already be
-# installed and registered with the host's Docker daemon - this script only selects it,
-# it doesn't install it. Sysbox gives the nested dockerd entrypoint.sh starts real
+# `--with-docker` (consumed here, not forwarded on; WITH_DOCKER=1 in run.local.sh makes
+# it the default) starts a nested Docker daemon (dockerd) inside the container, so the
+# session can build/run its own containers (testcontainers, compose dev stacks, ...).
+# That needs heavy privileges, so it's opt-in: without the flag there is no dockerd and
+# no --privileged at all, and the `docker` CLI in the container is inert (no socket).
+# With it, run.sh picks the sysbox-runc runtime when that's registered with the host's
+# Docker daemon (real user-namespace isolation around the nested daemon), and falls back
+# to --privileged otherwise.
+#
+# `--sysbox` (consumed here, not forwarded on) implies --with-docker and forces the
+# sysbox-runc OCI runtime (https://github.com/nestybox/sysbox) instead of --privileged;
+# sysbox must already be installed and registered with the host's Docker daemon - this
+# script only selects it, it doesn't install it. Sysbox gives the nested dockerd real
 # user-namespace isolation instead of `--privileged`'s "may as well be root on the host"
-# access, at the cost of a host-side dependency beyond plain Docker. Irrelevant if
-# combined with --allow-container, since that path skips the nested dockerd entirely -
-# there's nothing left for sysbox's isolation to apply to.
+# access, at the cost of a host-side dependency beyond plain Docker. Where sysbox isn't
+# installed, --with-docker alone still works via the --privileged fallback.
 #
 # `--allow-config` (consumed here, not forwarded on) lets this session write to the
 # harness's *configuration*. By default it can't: the harness's `state` dirs (e.g.
@@ -74,12 +84,14 @@
 # run the harness natively, so a session that gets talked into editing them could
 # escape the sandbox. See harnesses/README.md.
 #
-# `--bash-sandbox` (consumed here, not forwarded on; BASH_SANDBOX=1 in run.local.sh makes
-# it the default) starts the harness's `sandboxed_command` instead of its `command` - for
-# Claude Code, its own Bash sandbox (bubblewrap) on top of this container: real network
-# isolation for shell commands instead of squid's proxy-env-only filtering, and no read
-# access to the login token. Refused for a harness without one. See
-# README.md.
+# `--bash-sandbox` / `--no-bash-sandbox` (consumed here, not forwarded on) control
+# whether the harness's `sandboxed_command` (if it has one) is started instead of its
+# `command` - ON by default. For Claude Code, `sandboxed_command` is its own Bash sandbox
+# (bubblewrap) on top of this container: real network isolation for shell commands
+# instead of squid's proxy-env-only filtering, and no read access to the login token.
+# A harness without a `sandboxed_command` just runs its plain `command` (no error);
+# explicitly passing `--bash-sandbox` for such a harness is refused. `BASH_SANDBOX=0` in
+# the environment/run.local.sh turns it off permanently. See README.md.
 #
 # `--env-file <path>` (consumed here, not forwarded on; ENV_FILE in run.local.sh sets a
 # default) passes the variables in a docker env file into the session, e.g. tokens that
@@ -99,8 +111,10 @@ allow_list=""
 allow_internet=0
 allow_container=0
 allow_config=0
+with_docker=0
 sysbox=0
 cli_bash_sandbox=0
+cli_no_bash_sandbox=0
 cli_env_file=""
 no_env_file=0
 cli_mounts=()
@@ -109,6 +123,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --host-network) host_network=1; shift ;;
     --bash-sandbox) cli_bash_sandbox=1; shift ;;
+    --no-bash-sandbox) cli_no_bash_sandbox=1; shift ;;
     --env-file)
       if [[ $# -lt 2 ]]; then
         echo "run.sh: --env-file requires a path argument" >&2
@@ -122,7 +137,8 @@ while [[ $# -gt 0 ]]; do
     --allow-internet) allow_internet=1; shift ;;
     --allow-container) allow_container=1; shift ;;
     --allow-config) allow_config=1; shift ;;
-    --sysbox) sysbox=1; shift ;;
+    --with-docker) with_docker=1; shift ;;
+    --sysbox) sysbox=1; with_docker=1; shift ;;
     --harness)
       if [[ $# -lt 2 ]]; then
         echo "run.sh: --harness requires a harness name" >&2
@@ -172,6 +188,12 @@ if [[ -n "$allow_list" ]]; then
   allow_list="$(cd "$(dirname "$allow_list")" && pwd)/$(basename "$allow_list")"
 fi
 
+if [[ "$allow_container" -eq 1 && ( "$with_docker" -eq 1 || "$sysbox" -eq 1 ) ]]; then
+  echo "run.sh: --allow-container and --with-docker/--sysbox are mutually exclusive" >&2
+  echo "(one mounts the host's Docker daemon, the other runs a nested one)" >&2
+  exit 1
+fi
+
 if [[ "$allow_container" -eq 1 && ! -S /var/run/docker.sock ]]; then
   echo "run.sh: --allow-container passed but /var/run/docker.sock not found on this host" >&2
   exit 1
@@ -195,13 +217,19 @@ EXTRA_CONFIG_RO_PATHS=()
 HARNESS="${HARNESS:-claude}"
 CONTAINER_UID="${CONTAINER_UID:-}"
 CONTAINER_GID="${CONTAINER_GID:-}"
-BASH_SANDBOX="${BASH_SANDBOX:-0}"
+BASH_SANDBOX="${BASH_SANDBOX:-}"
+WITH_DOCKER="${WITH_DOCKER:-}"
 ENV_FILE="${ENV_FILE:-}"
 if [[ -f "$script_dir/config/run.local.sh" ]]; then
   . "$script_dir/config/run.local.sh"
 fi
 
 harness="${cli_harness:-$HARNESS}"
+if [[ "$WITH_DOCKER" == 1 ]]; then with_docker=1; fi
+if [[ "$allow_container" -eq 1 && "$with_docker" -eq 1 ]]; then
+  echo "run.sh: --allow-container and --with-docker/--sysbox (or WITH_DOCKER=1 in run.local.sh) are mutually exclusive" >&2
+  exit 1
+fi
 harness_conf_file="$script_dir/harnesses/$harness/harness.conf"
 if [[ ! -f "$harness_conf_file" ]]; then
   echo "run.sh: unknown harness '$harness' (no $harness_conf_file)" >&2
@@ -214,23 +242,29 @@ harness_conf() { sed -n "s/^$1=//p" "$harness_conf_file" | tail -n 1; }
 read -r -a harness_state <<< "$(harness_conf state)"
 read -r -a harness_staged <<< "$(harness_conf staged)"
 read -r -a harness_config <<< "$(harness_conf config)"
+read -r -a harness_tmpfs <<< "$(harness_conf tmpfs)"
 config_ro_paths=(${harness_config[@]+"${harness_config[@]}"} ${EXTRA_CONFIG_RO_PATHS[@]+"${EXTRA_CONFIG_RO_PATHS[@]}"})
 
-# --bash-sandbox, or BASH_SANDBOX=1 from the environment/run.local.sh. entrypoint.sh
-# refuses too, but checking here gives the error before docker starts anything.
+# The Bash sandbox is ON by default for harnesses that define a sandboxed_command;
+# --no-bash-sandbox or BASH_SANDBOX=0 turns it off. --bash-sandbox forces it on and is
+# refused for a harness without one. entrypoint.sh refuses too, but checking here gives
+# the error before docker starts anything.
 bash_sandbox=0
-bash_sandbox_desc="off (default; pass --bash-sandbox or set BASH_SANDBOX=1 to enable)"
-if [[ "$cli_bash_sandbox" -eq 1 || "$BASH_SANDBOX" == 1 ]]; then
+bash_sandbox_desc=""
+if [[ "$cli_no_bash_sandbox" -eq 1 || "$BASH_SANDBOX" == 0 ]]; then
+  bash_sandbox_desc="off ($([[ "$cli_no_bash_sandbox" -eq 1 ]] && echo "--no-bash-sandbox passed" || echo "BASH_SANDBOX=0"))"
+elif [[ "$cli_bash_sandbox" -eq 1 ]]; then
   if [[ -z "$(harness_conf sandboxed_command)" ]]; then
     echo "run.sh: --bash-sandbox: harness '$harness' has no sandboxed_command in its harness.conf" >&2
     exit 1
   fi
   bash_sandbox=1
-  if [[ "$cli_bash_sandbox" -eq 1 ]]; then
-    bash_sandbox_desc="ON (--bash-sandbox passed): $(harness_conf sandboxed_command)"
-  else
-    bash_sandbox_desc="ON (BASH_SANDBOX=1): $(harness_conf sandboxed_command)"
-  fi
+  bash_sandbox_desc="ON (--bash-sandbox passed): $(harness_conf sandboxed_command)"
+elif [[ -z "$(harness_conf sandboxed_command)" ]]; then
+  bash_sandbox_desc="n/a (harness '$harness' has no sandboxed_command; plain command)"
+else
+  bash_sandbox=1
+  bash_sandbox_desc="ON (default; --no-bash-sandbox to disable): $(harness_conf sandboxed_command)"
 fi
 
 # --env-file, else ENV_FILE from the environment/run.local.sh, else the default path if
@@ -287,7 +321,7 @@ if [[ -n "$env_file" ]]; then
       exit 1
     fi
     case "$key" in
-      HOME|PATH|USER|SHELL|SUDO_*|HOST_*|AGENTCONTAINER_*|SQUID_*|ALLOW_CONTAINER|[Hh][Tt][Tt][Pp]_[Pp][Rr][Oo][Xx][Yy]|[Hh][Tt][Tt][Pp][Ss]_[Pp][Rr][Oo][Xx][Yy]|[Nn][Oo]_[Pp][Rr][Oo][Xx][Yy]|[Aa][Ll][Ll]_[Pp][Rr][Oo][Xx][Yy])
+      HOME|PATH|USER|SHELL|SUDO_*|HOST_*|AGENTCONTAINER_*|SQUID_*|ALLOW_CONTAINER|WITH_DOCKER|[Hh][Tt][Tt][Pp]_[Pp][Rr][Oo][Xx][Yy]|[Hh][Tt][Tt][Pp][Ss]_[Pp][Rr][Oo][Xx][Yy]|[Nn][Oo]_[Pp][Rr][Oo][Xx][Yy]|[Aa][Ll][Ll]_[Pp][Rr][Oo][Xx][Yy])
         echo "run.sh: $env_file: '$key' is reserved by the sandbox and can't be set from an env file" >&2
         exit 1
         ;;
@@ -332,8 +366,9 @@ fi
 if [[ "$show_help" -eq 1 ]]; then
   cat <<EOF
 Usage: run.sh [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
-              [--allow-container] [--allow-config] [--sysbox] [--mount <path|host:container[:ro]>]...
-              [--bash-sandbox] [--env-file <path> | --no-env-file]
+              [--allow-container | --with-docker [--sysbox]] [--allow-config]
+              [--mount <path|host:container[:ro]>]...
+              [--no-bash-sandbox] [--env-file <path> | --no-env-file]
               [-h|--help] [harness-args... | command...]
 
 Launches a fresh, disposable sandbox container scoped to \$PWD. Only \$PWD and the
@@ -358,11 +393,19 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     to mount elsewhere or read-only. Repeatable. On top of run.local.sh's
                     EXTRA_MOUNTS, not a replacement for it. Consumed here, never
                     forwarded to docker/the harness.
-  --allow-container Bind-mount the HOST's own Docker socket in, instead of the sandbox's
-                    nested dockerd. Containers started this way run on the host daemon as
+  --allow-container Bind-mount the HOST's own Docker socket in, instead of a nested
+                    dockerd. Containers started this way run on the host daemon as
                     siblings, not nested inside the sandbox - host-visible, not cleaned up
                     when this container exits. OFF by default: this is root-equivalent
-                    access to the host. Consumed here, never forwarded to docker/the harness.
+                    access to the host. Mutually exclusive with --with-docker/--sysbox.
+                    Consumed here, never forwarded to docker/the harness.
+  --with-docker     Start a nested Docker daemon (dockerd) inside the container, so the
+                    session can build/run its own containers. Needs heavy privileges, so
+                    it's opt-in: without it there is no dockerd and no --privileged, and
+                    the docker CLI in the container is inert (no socket). Uses the
+                    sysbox-runc runtime if this host has it registered, --privileged
+                    otherwise. WITH_DOCKER=1 in run.local.sh makes it the default.
+                    Consumed here, never forwarded to docker/the harness.
   --allow-config    Let this session change the harness's config on the host (its
                     harness.conf \`config\` and \`staged\` entries, e.g. settings/hooks/
                     plugins under ~/.claude and ~/.claude.json). OFF by default: those
@@ -370,16 +413,19 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     exit. Session state (transcripts, history, login) stays writable
                     either way. Consumed
                     here, never forwarded to docker/the harness.
-  --sysbox          Use the sysbox-runc OCI runtime instead of --privileged, for real
-                    user-namespace isolation around the nested dockerd. Must already be
-                    installed and registered with this host's Docker daemon - see
-                    https://github.com/nestybox/sysbox. Consumed here, never forwarded
-                    to docker/the harness.
-  --bash-sandbox    Start the harness's sandboxed_command instead of its command. For
-                    Claude Code: its own Bash sandbox (bubblewrap) on top of the
-                    container - shell commands get no direct network access (only via
-                    the allowlist) and can't read the login token.
-                    BASH_SANDBOX=1 in run.local.sh makes it the default. Consumed here,
+  --sysbox          Implies --with-docker and forces the sysbox-runc OCI runtime instead
+                    of --privileged, for real user-namespace isolation around the nested
+                    dockerd. Must already be installed and registered with this host's
+                    Docker daemon - see https://github.com/nestybox/sysbox. Consumed
+                    here, never forwarded to docker/the harness.
+  --no-bash-sandbox Don't start the harness's sandboxed_command even if it has one - use
+                    its plain command instead. The sandbox (ON by default where the
+                    harness defines one; for Claude Code: its own Bash sandbox,
+                    bubblewrap, on top of the container - shell commands get no direct
+                    network access and can't read the login token) is turned off
+                    permanently by BASH_SANDBOX=0 in run.local.sh.
+  --bash-sandbox    Force the sandboxed_command on and refuse if the harness has none.
+                    Redundant by default; kept as the explicit opt-in. Consumed here,
                     never forwarded to docker/the harness.
   --env-file PATH   Pass the variables in PATH (docker env file: KEY=value per line) into
                     the session, e.g. tokens MCP servers reference as \${VAR}. Overrides
@@ -399,9 +445,9 @@ Effective config on this machine:
   Harness:        $harness$([[ -n "$cli_harness" ]] && echo " (--harness passed)")
   Image:          $image
   Network:        $([[ "$host_network" -eq 1 ]] && echo "host (--host-network passed)" || echo "bridge (default; pass --host-network to change)")
-  Runtime:        $([[ "$sysbox" -eq 1 ]] && echo "sysbox-runc (--sysbox passed; no --privileged)" || echo "--privileged (default; pass --sysbox to use sysbox-runc instead, if installed)")
+  Runtime:        $([[ "$allow_container" -eq 1 ]] && echo "plain runc, unprivileged (host socket mounted; no nested dockerd to privilege)" || { [[ "$with_docker" -eq 1 ]] && { [[ "$sysbox" -eq 1 ]] && echo "sysbox-runc (--sysbox passed)" || { docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc && echo "sysbox-runc (auto: registered on this host)" || echo "--privileged (--with-docker; install sysbox-runc for user-namespace isolation instead)"; }; } || echo "plain runc, unprivileged (default; pass --with-docker for a nested dockerd)"; })
   Allowlist:      $([[ "$allow_internet" -eq 1 ]] && echo "DISABLED (--allow-internet passed - any host reachable via the proxy)" || { [[ -n "$allow_list" ]] && echo "$allow_list (--allow-list passed, overrides image default)" || echo "image default (allowed-domains.txt baked in at build; pass --allow-list to override)"; })
-  Docker socket:  $([[ "$allow_container" -eq 1 ]] && echo "HOST /var/run/docker.sock (--allow-container passed - root-equivalent host access)" || echo "sandboxed nested dockerd only (default; pass --allow-container to use the host daemon)")
+  Docker socket:  $([[ "$allow_container" -eq 1 ]] && echo "HOST /var/run/docker.sock (--allow-container passed - root-equivalent host access)" || { [[ "$with_docker" -eq 1 ]] && echo "nested dockerd in the container (--with-docker passed)" || echo "none (default; pass --with-docker for a nested dockerd, --allow-container for the host daemon)"; })
   Harness config: $([[ "$allow_config" -eq 1 ]] && echo "WRITABLE (--allow-config passed - edits persist on the host)" || echo "read-only (default; pass --allow-config to let the harness change it)")
   dev UID:GID:    $remap_desc
   Bash sandbox:   $bash_sandbox_desc
@@ -411,6 +457,9 @@ Effective config on this machine:
 EOF
   for entry in ${harness_state[@]+"${harness_state[@]}"}; do
     echo "    $HOME/$entry -> $HOME/$entry (dev's \$HOME is set to match, see README.md)"
+  done
+  for entry in ${harness_tmpfs[@]+"${harness_tmpfs[@]}"}; do
+    echo "    $HOME/$entry -> tmpfs (container-local, writable, discarded on exit)"
   done
   if [[ "$allow_config" -eq 1 ]]; then
     for entry in ${config_ro_paths[@]+"${config_ro_paths[@]}"}; do
@@ -492,6 +541,17 @@ for entry in ${harness_state[@]+"${harness_state[@]}"}; do
   docker_args+=(-v "$HOME/$entry:$HOME/$entry")
 done
 
+# harness.conf `tmpfs`: $HOME-relative paths that must be writable in the session but
+# must never reach the host (e.g. Claude Code's shell snapshots, which it sources in
+# every later Bash session, host runs included). The tmpfs covers the path inside the
+# state mount: writes land in the container's memory and die with it (--rm). Docker
+# creates the mount-point directory inside the state mount, so an empty dir shows up
+# on the host - harmless for these paths (the harness creates them itself anyway).
+# entrypoint.sh chowns the mounts to dev.
+for entry in ${harness_tmpfs[@]+"${harness_tmpfs[@]}"}; do
+  docker_args+=(--tmpfs "$HOME/$entry")
+done
+
 # See the remap_uid block near the top.
 if [[ -n "$remap_uid" ]]; then
   docker_args+=(-e "HOST_UID=$remap_uid" -e "HOST_GID=$remap_gid")
@@ -524,13 +584,21 @@ else
   done
 fi
 
-# --privileged is the default, needed for the inner dockerd (Docker-in-Docker). --sysbox
-# swaps it for the sysbox-runc runtime instead, which gives that same nested dockerd real
-# user-namespace isolation rather than near-root host access - see the header comment.
-if [[ "$sysbox" -eq 1 ]]; then
-  docker_args+=(--runtime=sysbox-runc)
-else
-  docker_args+=(--privileged)
+# Docker-in-Docker is opt-in (--with-docker / --sysbox): by default there is no nested
+# dockerd and no --privileged at all. When requested, prefer the sysbox-runc runtime
+# (real user-namespace isolation around the nested dockerd) if it's registered with this
+# host's Docker daemon, and fall back to --privileged otherwise - see the header comment.
+# --allow-container needs no privilege of its own: it just mounts the host socket, and
+# entrypoint.sh skips starting a nested dockerd when it's set (same socket path).
+if [[ "$allow_container" -eq 1 ]]; then
+  docker_args+=(-v /var/run/docker.sock:/var/run/docker.sock -e "ALLOW_CONTAINER=1")
+elif [[ "$with_docker" -eq 1 ]]; then
+  docker_args+=(-e "WITH_DOCKER=1")
+  if [[ "$sysbox" -eq 1 ]] || docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc; then
+    docker_args+=(--runtime=sysbox-runc)
+  else
+    docker_args+=(--privileged)
+  fi
 fi
 
 if [[ "$host_network" -eq 1 ]]; then
@@ -549,17 +617,13 @@ if [[ "$allow_internet" -eq 1 ]]; then
   docker_args+=(-e "SQUID_ALLOW_INTERNET=1")
 fi
 
-# entrypoint.sh skips starting its own nested dockerd when this is set, since the host
-# socket is mounted at the same path and would conflict with it - see entrypoint.sh.
-# Root-equivalent access to the host: off by default, opt-in per session only.
-if [[ "$allow_container" -eq 1 ]]; then
-  docker_args+=(-v /var/run/docker.sock:/var/run/docker.sock -e "ALLOW_CONTAINER=1")
-fi
-
-# entrypoint.sh starts the harness's sandboxed_command instead of its command - see
-# the --bash-sandbox block near the top.
+# entrypoint.sh starts the harness's sandboxed_command instead of its command (or the
+# other way round with =0) - see the bash sandbox block near the top. Only needs to be
+# explicit where the harness actually has a sandboxed_command to switch on/off.
 if [[ "$bash_sandbox" -eq 1 ]]; then
   docker_args+=(-e "AGENTCONTAINER_BASH_SANDBOX=1")
+elif [[ -n "$(harness_conf sandboxed_command)" ]]; then
+  docker_args+=(-e "AGENTCONTAINER_BASH_SANDBOX=0")
 fi
 
 # Docker reads the env file itself; entrypoint.sh needs the names to keep them through

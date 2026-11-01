@@ -128,7 +128,16 @@ flowchart LR
 ```
 
 - **Read-write:** your project and `~/.claude`, which Claude Code needs for its login,
-  token refreshes, transcripts and history.
+  token refreshes, transcripts and history. One exception: `~/.claude/shell-snapshots`
+  is a container-local tmpfs - Claude Code sources those snapshots in every later Bash
+  session *including native host runs*, so they're writable in the session but never
+  reach the host.
+- **Project-level settings:** `.claude/settings.json`, `.claude/settings.local.json`
+  and `.mcp.json` sit in your (writable) project folder, where no mount can cover
+  them - and the host's own `claude` trusts them on the next run in that folder. In the
+  default (sandboxed) session, permission rules deny in-session edits to them. With
+  `--no-bash-sandbox` they stay writable: don't have the session change the
+  project's Claude Code config there, edit it on the host instead.
 - **Read-only:** everything that could make the host's own `claude` run code later
   (settings with hooks, plugins, agents, commands, skills). Installing a plugin or
   changing a setting fails inside the session unless you pass `--allow-config`.

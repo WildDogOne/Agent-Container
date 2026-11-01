@@ -29,9 +29,16 @@ EXTRA_MOUNTS=(
 # CONTAINER_UID=1234
 # CONTAINER_GID=1234
 
-# Start every session as if --bash-sandbox was passed: the harness's sandboxed_command
-# (for Claude Code, its own Bash sandbox on top of the container). See README.md.
-# BASH_SANDBOX=1
+# Start every session as if --with-docker was passed: a nested Docker daemon inside the
+# container (with --privileged, or the sysbox-runc runtime if this host has it
+# registered). Without it there is no dockerd and no --privileged at all. See README.md.
+# WITH_DOCKER=1
+
+# Turn the Bash sandbox off: the harness's plain `command` instead of its
+# sandboxed_command (for Claude Code: no bubblewrap sandbox around its shell commands).
+# The sandbox is ON by default for harnesses that define one; 1 is the default and only
+# 0 changes anything. See README.md.
+# BASH_SANDBOX=0
 
 # Docker env file passed into every session (--env-file overrides it), e.g. tokens your
 # MCP servers reference as ${VAR} instead of keeping them in ~/.claude.json. Keep it

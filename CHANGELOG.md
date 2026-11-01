@@ -7,6 +7,44 @@ the change takes effect.
 
 ## Unreleased
 
+### Changed
+
+- Default posture: a session now runs **unprivileged with no Docker at all**. The nested
+  `dockerd` and `--privileged` are opt-in via the new `run.sh --with-docker` (uses the
+  `sysbox-runc` runtime when the host has it registered, `--privileged` otherwise);
+  `--sysbox` implies `--with-docker` and forces sysbox. `--allow-container` (host
+  socket) needs no privileges and is now mutually exclusive with both. `WITH_DOCKER=1`
+  in `run.local.sh`/`run.local.ps1` makes it standing. `run.sh --help` shows what the
+  session gets. **rebuild** (`image/entrypoint.sh`); the run scripts apply without one.
+- The Bash sandbox is **on by default** for every harness that defines a
+  `sandboxed_command` (claude today): a session starts it unless you pass
+  `--no-bash-sandbox` or set `BASH_SANDBOX=0`. `--bash-sandbox` stays as an explicit
+  opt-in (refused for harnesses without one); harnesses that have no
+  `sandboxed_command` (hermes, opencode) run their plain `command` as before.
+  **rebuild** (`image/entrypoint.sh`)
+- `dev` has **no `sudo` inside the container** anymore (the NOPASSWD sudoers entry is
+  gone; `entrypoint.sh` still drops from root PID 1 to `dev` via sudo, which doesn't
+  need an entry). As a replacement for the old `sudo tail` advice, the squid logs are
+  world-readable: `tail /tmp/squid-access.log`. **rebuild** (`image/Dockerfile`,
+  `image/entrypoint.sh`)
+- Hermes harness: `~/.hermes/installs` (the dependency environment Hermes prepares on
+  first launch and then *executes*) is no longer symlinked into the container's session
+  home by `hermes-session` - it's container-local now, prepared per session. Sharing it
+  rw let a session plant code that the host's native hermes would run from the shared
+  `~/.hermes`. Cost: `installs/` is re-downloaded per session. **rebuild**
+  (`harnesses/hermes/`)
+- Claude harness: `~/.claude/shell-snapshots` is no longer shared read-write with the
+  host. Claude Code sources those snapshots in every later Bash session, native host
+  runs included, so a session could hand the host a file to execute. It's now covered by
+  a container-local tmpfs (new `harness.conf` key `tmpfs`, see below): writable in the
+  session, discarded on exit. **rebuild** (`harnesses/claude/`, `image/entrypoint.sh`)
+- `run.sh --bash-sandbox` (claude): the generated settings now also deny `Edit` on the
+  project's own `.claude/settings.json`, `.claude/settings.local.json` and `.mcp.json`.
+  Those live in the writable project mount, where the read-only config mounts can't
+  reach them, and the host's own `claude` trusts them on the next run in that folder.
+  Note: only the sandboxed mode gets these rules; with `--no-bash-sandbox` the project
+  settings stay writable. **rebuild** (`harnesses/claude/claude-sandboxed`)
+
 ### Fixed
 
 - Hermes harness: starting a second `run.sh --harness hermes` session while one is
@@ -25,6 +63,12 @@ the change takes effect.
 
 ### Added
 
+- `harness.conf` key `tmpfs` (space-separated, relative to `$HOME`): paths mounted as
+  container-local tmpfs on top of a `state` dir - writable inside the session, never
+  reach the host, discarded on exit. For state the tool must write *and* later executes.
+  Parsed by `run.sh`, `run.ps1` and `entrypoint.sh` (which chowns the root-owned mounts
+  to dev); listed by `--help`. Format documented in `harnesses/README.md`. **rebuild**
+  (`image/entrypoint.sh`; the run scripts apply without a rebuild)
 - `run.sh --bash-sandbox` (or `BASH_SANDBOX=1` in `config/run.local.sh`): starts the
   harness's new `harness.conf` key `sandboxed_command` instead of `command`. For Claude
   Code that's `claude-sandboxed`, which turns on Claude Code's own Bash sandbox
