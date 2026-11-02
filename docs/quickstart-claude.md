@@ -146,6 +146,12 @@ flowchart LR
   reset every session.
 - **Egress:** only through squid, to the domains in `harnesses/claude/allowed-domains.txt`
   plus the shared defaults.
+- **Bash sandbox caveat, sysbox only:** under `--sysbox` the Bash sandbox falls back to
+  nested mode (see the [README](../README.md#bash-sandbox)), where sandboxed shell
+  commands can read `/proc/<pid>/environ` of Claude Code and its MCP servers - so
+  `--env-file` variables, while stripped from the commands' own environment, are still
+  reachable there. Don't run sysbox sessions with the Bash sandbox if the env file
+  holds secrets that the project's prompts might want to exfiltrate.
 
 ## Common tweaks
 

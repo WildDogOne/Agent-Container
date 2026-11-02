@@ -104,12 +104,12 @@ something. Only after Phase 2, since the rule set depends on the runtime mode.
 
 ## Phase 4 — small / documentation
 
-- [ ] **Nested-mode `/proc` environ leak** (`claude-sandboxed:53`): same-UID
+- [x] **Nested-mode `/proc` environ leak** (`claude-sandboxed:53`): same-UID
       sandboxed Bash can read `/proc/<pid>/environ` of claude/MCP processes in
       sysbox/nested mode, bypassing the `credentials.envVars` deny. No cheap fix
       (hidepid isn't available to bwrap) — document the limitation in
       `claude-sandboxed`'s header and `docs/quickstart-claude.md`.
-- [ ] Update `README.md` + quickstarts for every flag/default flip; add
+- [x] Update `README.md` + quickstarts for every flag/default flip; add
       `## Unreleased` CHANGELOG entries (marked **rebuild** where applicable) as
       each phase lands.
 

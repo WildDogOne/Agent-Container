@@ -408,9 +408,17 @@ namespaces, which Claude Code doesn't create. So in nested mode:
   do work in nested mode;
 - sandboxed commands may create user namespaces of their own. The sandbox's mounts are
   locked inside them: unmasking the denied files or remounting read-only paths writable
-  is refused (tested).
+  is refused (tested);
+- **known leak:** because that `/proc` is the container's and everything in the
+  container runs as the same UID, sandboxed commands can read `/proc/<pid>/environ` of
+  Claude Code and its MCP servers. `--env-file` variables are stripped from the
+  commands' own environment but still readable there, so the `--env-file` secret
+  handling is only fully effective in normal mode. The login token and config backups
+  stay denied either way (they're files, not env vars). No cheap fix: `hidepid` isn't
+  something bwrap can set on that bind mount.
 
-Secrets, network and write restrictions behave the same as in normal mode.
+Network and write restrictions behave the same as in normal mode; secrets slightly less
+so (the `/proc` bullet above).
 
 What it costs: tools that need raw network access (`nmap`, `ping`) don't work in a
 sandboxed session, and every new domain needs your OK or an allowlist entry. With

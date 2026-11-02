@@ -23,6 +23,11 @@ the change takes effect.
   a raw IP, so tools configured with an IP host (e.g. a self-hosted model server on
   the LAN) were silently unreachable once traffic actually went through squid.
   **rebuild** (`image/squid.conf`, `image/entrypoint.sh`)
+- Documented a known Bash-sandbox leak in nested (sysbox) mode: sandboxed commands can
+  read `/proc/<pid>/environ` of Claude Code and its MCP servers (container `/proc`,
+  same UID), so `--env-file` variables are exposed to sandboxed shell commands there.
+  (`harnesses/claude/claude-sandboxed` header, README, `docs/quickstart-claude.md`)
+  **rebuild** (header comment only)
 - **git-over-SSH support removed**: the `SSH_AUTH_SOCK` agent-forwarding mount is gone
   from both `run.sh` and `run.ps1` (outbound :22 falls into the firewall reject).
   Pushing is a host-side operation; inside the container use HTTPS remotes with

@@ -40,6 +40,13 @@ rm -f "$settings"
 # - sandboxed commands may create user namespaces (blocking that also needs
 #   apply-seccomp or a fresh /proc). The mounts bwrap sets up are locked in any such
 #   namespace, so this can't unmask the denied files or make read-only paths writable.
+# KNOWN LIMITATION in nested mode: sandboxed commands see the container's /proc and run
+# as the same UID as claude and its MCP servers, so /proc/<pid>/environ of those
+# processes is readable from sandboxed Bash. The credentials.envVars deny below only
+# strips the variables from the commands' own environment, it cannot hide them there -
+# --env-file secrets are exposed to sandboxed shell commands in nested (sysbox) mode.
+# Normal mode is unaffected: its fresh /proc hides the other processes outright. No
+# cheap fix (hidepid isn't something bwrap can set on that mount).
 # Both probes mirror the namespaces and /proc mount Claude Code itself uses, so a
 # probe that passes means its commands will start. Neither working -> refuse: a session
 # the user asked to be sandboxed must not silently run without it.
