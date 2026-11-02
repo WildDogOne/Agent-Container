@@ -112,13 +112,3 @@ something. Only after Phase 2, since the rule set depends on the runtime mode.
 - [x] Update `README.md` + quickstarts for every flag/default flip; add
       `## Unreleased` CHANGELOG entries (marked **rebuild** where applicable) as
       each phase lands.
-
-## Sequencing notes
-
-- Phase 1 items are one-time cost and protect against the realistic attack
-  (prompt injection writing host-executed code) even if nothing else changes.
-- Phase 2 changes defaults = user-visible behavior; each item should land with its
-  own CHANGELOG entry and opt-out flag rather than as one flip.
-- Phase 3 is the only item likely to break existing workflows (SSH, odd egress);
-  do it after the defaults are honest, and keep `--allow-internet` as the escape
-  hatch.
