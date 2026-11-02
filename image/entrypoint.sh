@@ -35,8 +35,12 @@ fi
 # squid's dstdomain ACL can't take one, so split the list into bare domains and the
 # extra ports to allow on top of 80/443 (see squid.conf). A listed port is open for
 # every allowed domain, not just that one - the domain check still applies.
+# Bare IPv4/CIDR entries (`10.10.10.81:8896`) are allowed too - dstdomain never matches
+# a request to a raw IP, so they go into a separate squid `dst` ACL. (IPv6 not
+# supported in the list.)
 sed 's/\r$//; s/#.*//; s/[[:space:]]//g' /etc/squid/allowed-domains.txt | grep -v '^$' > /tmp/allowlist || true
-sed 's/:[0-9]*$//' /tmp/allowlist | sort -u > /etc/squid/allowed-dstdomains.txt
+sed 's/:[0-9]*$//' /tmp/allowlist | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$' | sort -u > /etc/squid/allowed-dsts.txt
+sed 's/:[0-9]*$//' /tmp/allowlist | grep -vE '^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$' | sort -u > /etc/squid/allowed-dstdomains.txt
 { printf '80\n443\n'; sed -n 's/.*:\([0-9][0-9]*\)$/\1/p' /tmp/allowlist; } | sort -un > /etc/squid/allowed-ports.txt
 rm -f /tmp/allowlist
 
@@ -50,6 +54,7 @@ rm -f /tmp/allowlist
 if [ "${SQUID_ALLOW_INTERNET:-0}" = "1" ]; then
   echo "entrypoint.sh: --allow-internet passed, disabling squid's domain and port allowlists for this session" >&2
   sed -i -e 's/^http_access allow allowed_dst$/http_access allow all/' \
+         -e '/^http_access allow allowed_ip$/d' \
          -e '/^http_access deny !Safe_ports$/d' \
          -e '/^http_access deny CONNECT !SSL_ports$/d' /etc/squid/squid.conf
 fi
@@ -110,6 +115,48 @@ elif [ "${WITH_DOCKER:-0}" = "1" ]; then
   # is no daemon at all: the docker CLI in the container has no socket to talk to.
   nohup dockerd --host=unix:///var/run/docker.sock > /tmp/dockerd.log 2>&1 &
   sleep 1
+fi
+
+# Egress firewall (see README "Network"): squid alone is advisory - a tool that
+# ignores the proxy env vars (curl --noproxy, raw sockets, resolve-then-connect)
+# could still reach the network directly. These nftables rules make it enforced:
+# only root (squid's own DNS resolution, dockerd under --with-docker) and the squid
+# helper user may originate traffic directly; everyone else (dev and everything it
+# spawns) is limited to loopback (the squid proxy, dev servers), the docker0/br-*
+# bridges (port-published nested containers), and replies to allowed flows.
+# Everything else is rejected - outbound :22 included: git-over-SSH is not
+# supported in the sandbox, pushing is a host-side operation.
+# Needs NET_ADMIN in the container (run.sh adds --cap-add NET_ADMIN; it is
+# netns-scoped, and dev has no sudo to pick it up). Skipped with --host-network
+# (the rules would land in the HOST's ruleset) and --allow-internet (unrestricted
+# egress is that flag's point). Nested containers' own traffic goes through the
+# forward path, not this output chain - DinD egress is the nested daemon's business,
+# not covered by the allowlist.
+if [ "${AGENTCONTAINER_HOST_NETWORK:-0}" = "1" ]; then
+  echo "entrypoint.sh: --host-network: skipping the nftables egress firewall (it would modify the host's ruleset)" >&2
+elif [ "${SQUID_ALLOW_INTERNET:-0}" = "1" ]; then
+  echo "entrypoint.sh: --allow-internet: skipping the nftables egress firewall (unrestricted egress requested)" >&2
+else
+  if ! nft -f - <<EOF
+table inet agentcfgr
+delete table inet agentcfgr
+table inet agentcfgr {
+  chain output {
+    type filter hook output priority filter; policy accept;
+    oif lo accept
+    oifname { "docker0", "br-*" } accept
+    ct state established, related accept
+    meta skuid 0 accept
+    meta skuid $(id -u proxy) accept
+    reject
+  }
+}
+EOF
+  then
+    echo "entrypoint.sh: failed to install the nftables egress firewall - refusing to start" >&2
+    echo "entrypoint.sh: (kernel without nf_tables? --allow-internet starts without the firewall)" >&2
+    exit 1
+  fi
 fi
 
 # apt doesn't reliably pick up *_proxy env vars for Acquire (varies by version/method),

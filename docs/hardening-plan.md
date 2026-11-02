@@ -82,21 +82,25 @@ Make the sandbox match the safety argument instead of the docs matching the sand
 Turn squid from advisory into enforced, so `--permission-mode auto` rests on
 something. Only after Phase 2, since the rule set depends on the runtime mode.
 
-- [ ] **nftables in `entrypoint.sh`** (before dropping to dev): outbound for dev
+- [x] **nftables in `entrypoint.sh`** (before dropping to dev): outbound for dev
       restricted to `127.0.0.1:3128` (squid) + outbound DNS blocked except from
       squid's uid; the `allowed-ports.txt` ports squid itself may reach stay as-is.
-      This closes the `curl --noproxy` / raw-socket / resolve-then-connect bypasses
-      in *default* (non-bwrap) mode.
-- [ ] **Decide the git-over-SSH carve-out.** Outbound :22 is currently unproxied
-      and unrestricted (agent forwarding is a documented feature). Either keep an
-      explicit allow for tcp/22 in the ruleset (documented, matches current
-      behavior) or gate it behind a flag. Pick one; the plan's default is keep-and-document.
-- [ ] **`--host-network` honesty.** It grants the container unrestricted access to
-      the *host's* loopback services — bigger than the inbound concern the
-      squid.conf comment mentions. Warn loudly (or require `--i-know` style
-      confirmation) and fix the comment.
-- [ ] `--allow-internet` drops the nftables rules too (it already drops the squid
-      ones), or the rules defeat the flag.
+      This closes the `curl --noproxy` / raw-socket / resolve-then-connect bypasses in
+      *default* (non-bwrap) mode.
+      Done: table `inet agentcfgr`, output chain; loopback + docker0/br-* +
+      established/related + root + proxy uid pass, everything else rejected.
+      `--cap-add NET_ADMIN` added by both run scripts (skipped with `--host-network`).
+      Fatal if the rules can't be installed. Nested containers (forward path) not
+      covered - documented.
+- [x] **Decide the git-over-SSH carve-out.** Decision: *remove it*. SSH agent
+      forwarding dropped from both run scripts; outbound :22 falls into the firewall
+      reject. Pushing is a host-side operation; HTTPS remotes (`gh auth`) inside.
+- [x] **`--host-network` honesty.** Kept (rare VPN need). `run.sh`/`run.ps1` now warn
+      loudly; the nftables firewall is skipped in that mode (would touch the host's
+      ruleset) and NET_ADMIN isn't added; squid.conf comment fixed to name the
+      host-loopback exposure.
+- [x] `--allow-internet` drops the nftables rules too (it already drops the squid
+      ones), so the rules don't defeat the flag.
 
 ## Phase 4 — small / documentation
 

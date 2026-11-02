@@ -16,10 +16,12 @@
 # - No UID/GID remap by default: Windows has no UIDs, and Docker Desktop's bind mounts of
 #   Windows folders accept writes from any container user and own the results by you.
 #   CONTAINER_UID/CONTAINER_GID (environment or config\run.local.ps1) still force one.
-# - No SSH agent forwarding: the Windows OpenSSH agent is a named pipe, which can't be
-#   mounted into a Linux container. Use HTTPS remotes (gh auth) inside instead.
+# - No git-over-SSH: agent forwarding was removed from both ports by design (outbound
+#   :22 is firewalled in the container); pushing is a host-side operation. Use HTTPS
+#   remotes (gh auth) inside instead.
 # - --sysbox is refused: sysbox can't be installed into Docker Desktop's VM.
-# - --host-network shares the network of Docker Desktop's VM, not of Windows itself.
+# - --host-network shares the network of Docker Desktop's VM, not of Windows itself,
+#   and skips the nftables egress firewall entrypoint.sh normally installs.
 #
 # A project that lives inside a WSL distro (\\wsl.localhost\...) is refused - open a WSL
 # shell there and use run.sh instead; it's also much faster, since bind mounts of Windows
@@ -282,7 +284,7 @@ if ($CONTAINER_UID -and $CONTAINER_UID -ne 'off') {
 if ($showHelp) {
   if ($hostNetwork) { $netDesc = "host (--host-network passed - Docker Desktop VM's network, not Windows')" }
   else { $netDesc = 'bridge (default; pass --host-network to change)' }
-  if ($allowInternet) { $listDesc = 'DISABLED (--allow-internet passed - any host reachable via the proxy)' }
+  if ($allowInternet) { $listDesc = 'DISABLED (--allow-internet passed - any host/port reachable, nftables egress firewall also off)' }
   elseif ($allowList) { $listDesc = "$allowList (--allow-list passed, overrides image default)" }
   else { $listDesc = 'image default (allowed-domains.txt baked in at build; pass --allow-list to override)' }
   if ($allowContainer) { $sockDesc = "Docker Desktop's /var/run/docker.sock (--allow-container passed - root-equivalent access to its VM and every container in it)" }
@@ -349,7 +351,7 @@ Effective config on this machine:
       Write-Host "    $(Get-HostHomePath $entry) -> copied in from a ro mount (edits discarded on exit)"
     }
   }
-  Write-Host '    (no SSH agent forwarding on Windows - use HTTPS remotes / gh auth inside)'
+  Write-Host '    (no git-over-SSH: agent forwarding is gone by design - use HTTPS remotes / gh auth inside)'
   if (@($EXTRA_MOUNTS).Count -gt 0) {
     foreach ($m in $EXTRA_MOUNTS) { Write-Host "    $m (from config\run.local.ps1)" }
   } else {
@@ -436,7 +438,13 @@ if ($allowContainer) {
   $dockerArgs.AddRange([string[]]@('--privileged', '-e', 'WITH_DOCKER=1'))
 }
 
-if ($hostNetwork) { $dockerArgs.AddRange([string[]]@('--network', 'host')) }
+if ($hostNetwork) {
+  Write-Warning '--host-network shares the Docker Desktop VM network namespace: the container reaches every service on that VM''s 127.0.0.1, and the nftables egress firewall is NOT installed (it would alter the VM''s ruleset). NET_ADMIN is not added either.'
+  $dockerArgs.AddRange([string[]]@('--network', 'host', '-e', 'AGENTCONTAINER_HOST_NETWORK=1'))
+} else {
+  # The nftables egress firewall in entrypoint.sh needs NET_ADMIN (netns-scoped).
+  $dockerArgs.AddRange([string[]]@('--cap-add', 'NET_ADMIN'))
+}
 
 if ($allowList) {
   Add-Bind $allowList '/etc/squid/allowed-domains.override.txt' -ReadOnly

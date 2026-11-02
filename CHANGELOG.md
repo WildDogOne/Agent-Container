@@ -9,6 +9,25 @@ the change takes effect.
 
 ### Changed
 
+- Egress is now **enforced, not just proxied**: `entrypoint.sh` installs an nftables
+  output-chain firewall (loopback, Docker bridges, established flows and the
+  root/proxy uids pass; everything else - `dev` included - is rejected), closing the
+  `curl --noproxy`, raw-socket, direct-DNS and resolve-then-connect bypasses.
+  `run.sh`/`run.ps1` add `--cap-add NET_ADMIN` (container-netns-scoped) for it.
+  `--allow-internet` now also drops the firewall (full internet, its stated purpose);
+  `--host-network` skips it so the rules can never touch the host's ruleset, and now
+  warns loudly about the host-loopback access it grants. **rebuild**
+  (`image/Dockerfile`, `image/entrypoint.sh`); the run scripts apply without one.
+- The egress allowlist now accepts **bare IPv4/CIDR entries** (`10.10.10.81:8896`),
+  enforced via a second squid `dst` ACL - `dstdomain` never matches a request aimed at
+  a raw IP, so tools configured with an IP host (e.g. a self-hosted model server on
+  the LAN) were silently unreachable once traffic actually went through squid.
+  **rebuild** (`image/squid.conf`, `image/entrypoint.sh`)
+- **git-over-SSH support removed**: the `SSH_AUTH_SOCK` agent-forwarding mount is gone
+  from both `run.sh` and `run.ps1` (outbound :22 falls into the firewall reject).
+  Pushing is a host-side operation; inside the container use HTTPS remotes with
+  `gh auth`.
+
 - Default posture: a session now runs **unprivileged with no Docker at all**. The nested
   `dockerd` and `--privileged` are opt-in via the new `run.sh --with-docker` (uses the
   `sysbox-runc` runtime when the host has it registered, `--privileged` otherwise);

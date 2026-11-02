@@ -42,6 +42,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo \
     # squid: loopback-only egress allowlist proxy, see squid.conf.
     squid \
+    # nftables: the egress firewall entrypoint.sh installs around squid, see entrypoint.sh.
+    nftables \
     # unzip: required by the Bun installer below (bun ships as a .zip release).
     unzip \
     && rm -rf /var/lib/apt/lists/*

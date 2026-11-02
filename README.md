@@ -8,8 +8,8 @@ agent gets your project folder and its own login, nothing else from your home
 directory, and only reaches the internet through a domain allowlist. When you exit,
 the container is gone.
 
-- **Scoped access:** only `$PWD`, the agent's own state (e.g. `~/.claude`), your SSH
-  agent if you have one, and any extra mounts you ask for.
+- **Scoped access:** only `$PWD`, the agent's own state (e.g. `~/.claude`),
+  and any extra mounts you ask for.
 - **Your config stays safe:** hooks, plugins, MCP servers and settings are mounted
   read-only, so a session can't plant something that runs on your host later.
 - **Egress allowlist:** outbound HTTP(S) goes through a squid proxy that only lets
@@ -32,7 +32,6 @@ unprivileged by default; only an explicitly requested nested Docker daemon
 - Or Windows 10/11 with Docker Desktop on WSL2: see [docs/windows.md](docs/windows.md),
   where `setup.ps1` installs everything and `build.ps1`/`run.ps1` replace the shell
   scripts.
-- Optional: an SSH agent (`$SSH_AUTH_SOCK`) for git-over-SSH inside the container.
 - Optional: [sysbox](docs/sysbox.md), for a nested Docker daemon (`--with-docker`) with
   real isolation instead of `--privileged`.
 
@@ -157,8 +156,8 @@ harness. They can go anywhere in the argument list:
 | `--harness NAME`                         | Run `harnesses/NAME` (image `agentcontainer:NAME`) instead of the default (`$HARNESS`, else `claude`).                                 |
 | `--mount PATH` / `--mount HOST:CTR[:ro]` | Extra bind mount. A bare path mounts read-write at the same path on both sides. Repeatable.                                         |
 | `--allow-list FILE`                      | Replace the whole egress allowlist with `FILE` (same format as `allowed-domains.txt`).                                              |
-| `--allow-internet`                       | Drop the domain and port allowlists (any host, any port; still proxied and logged). Can't be combined with `--allow-list`.         |
-| `--host-network`                         | Share the host's network namespace instead of the bridge network. For VPNs that block the bridge.                                   |
+| `--allow-internet`                       | Full internet for this session: drop the domain and port allowlists AND the nftables egress firewall (any host, any port; proxied traffic still logged). Can't be combined with `--allow-list`. |
+| `--host-network`                         | Share the host's network namespace instead of the bridge network. For VPNs that block the bridge - grants access to host loopback services and skips the nftables egress firewall.      |
 | `--allow-container`                      | Mount the **host's** Docker socket instead of any nested `dockerd`. Root-equivalent, see [below](#docker-inside-the-sandbox). |
 | `--with-docker`                          | Run a nested `dockerd` in the container (with `--privileged`, or sysbox if installed). Off by default, see [below](#docker-inside-the-sandbox). |
 | `--sysbox`                               | Implies `--with-docker` and forces the `sysbox-runc` runtime instead of `--privileged`. See [docs/sysbox.md](docs/sysbox.md). |
@@ -207,7 +206,6 @@ flowchart LR
     subgraph host["Host"]
         pwd["$PWD<br/>(target project)"]
         harnesscfg["harness state + config<br/>(e.g. ~/.claude, ~/.claude.json)"]
-        ssh["$SSH_AUTH_SOCK<br/>(if set)"]
         extramounts["--mount paths /<br/>EXTRA_MOUNTS"]
         allowoverride["--allow-list file"]
         hostsock["host /var/run/docker.sock<br/>(--allow-container only)"]
@@ -236,7 +234,6 @@ flowchart LR
     dockerd_host -- " starts from image " --> pid1
     pwd -. " bind mount rw, same path " .-> devcmd
     harnesscfg -. " bind mount, config ro " .-> devcmd
-    ssh -. " bind mount " .-> devcmd
     extramounts -. " bind mount " .-> devcmd
     allowoverride -. " ro mount, cp over allowlist " .-> squid
     hostsock -. " bind mount " .-> devcmd
@@ -278,7 +275,6 @@ flowchart LR
 | `$PWD`                                  | same path, read-write | Your project. Git and absolute paths behave as on the host.           |
 | Harness state, e.g. `~/.claude`         | same path, config ro  | Reuses the harness's login, settings, plugins and MCP config.         |
 | Staged files, e.g. `~/.claude.json`     | copied in             | Rewritten by the harness on every start, see below.                   |
-| `$SSH_AUTH_SOCK` (if set)               | same path             | Agent-forwarded git-over-SSH. No keys are copied in.                  |
 | `EXTRA_MOUNTS` in `config/run.local.sh` | as configured         | Standing mounts for this machine.                                     |
 | `--mount` arguments                     | as given              | One-off mounts for a single session.                                  |
 
@@ -332,7 +328,9 @@ All outbound HTTP (S) goes through a squid proxy inside the container, listening
 - `harnesses/NAME/allowed-domains.txt`: what the harness itself needs
 - `config/allowed-domains.txt`: your own additions (gitignored)
 
-One domain per line; a leading `.` also matches subdomains. Only ports 80 and 443 are
+One domain per line; a leading `.` also matches subdomains. Bare IPv4 addresses and
+CIDRs work too (`10.10.10.81`) - a tool pointed straight at an IP can't be matched by
+domain. Only ports 80 and 443 are
 allowed, unless an entry names another one: `llm.example.lan:8080` (for example a
 self-hosted model server) also opens port 8080, for every allowed domain. Add to your
 own file (and rebuild) when a workflow needs a new host. For a single session, use `--allow-list FILE`
@@ -345,17 +343,28 @@ own file (and rebuild) when a workflow needs a new host. For a single session, u
 - in apt's config
 - in git's config
 
-**This guards against accidents. It is not a hard boundary.** There are no iptables
-rules, so a tool that ignores proxy settings can still reach the network directly.
-For Claude Code, the [Bash sandbox](#bash-sandbox) (on by default) closes that gap for
-shell commands.
+**This is enforced, not just advisory.** `entrypoint.sh` also installs an nftables
+egress firewall: everything except loopback, the Docker bridges and replies to allowed
+flows is rejected for the `dev` user, so a tool that ignores proxy settings (`curl
+--noproxy`, raw sockets, resolve-then-connect) or tries outbound port 22 (no
+git-over-SSH: pushing stays a host-side operation) simply can't reach the network.
+Only root (squid's own resolution, a `--with-docker` nested daemon) originates traffic
+directly. `run.sh` adds `--cap-add NET_ADMIN` (scoped to the container's own network
+namespace) so the rules can be installed. The firewall is skipped by `--allow-internet`
+(unrestricted egress is its point) and by `--host-network` (the rules would land in the
+host's ruleset). Traffic from *nested* containers (with `--with-docker`) goes through
+the nested daemon, not this allowlist.
+For Claude Code, the [Bash sandbox](#bash-sandbox) (on by default) adds the harness's
+own network/ filesystem restrictions on top.
 
 Blocked requests are logged in `/tmp/squid-access.log` inside the container. Read it with
 `tail /tmp/squid-access.log` when something fails to download.
 
 `--host-network` swaps isolation for connectivity, for example behind a corporate VPN
 that only routes the host's own traffic. Only use it when the bridge network can't reach
-the internet.
+the internet: the container then reaches every service listening on the *host's*
+127.0.0.1, and the nftables egress firewall is not installed (it would modify the
+host's ruleset). `run.sh` warns loudly when you pass it.
 
 ## Bash sandbox
 
@@ -395,8 +404,8 @@ namespaces, which Claude Code doesn't create. So in nested mode:
   missing namespaces. It only ever adds isolation, and does nothing outside nested mode;
 - Claude Code's seccomp filter for Unix sockets can't run (it needs a fresh `/proc`), so
   sockets are reachable by path. The nested Docker daemon's sockets are denied as files
-  instead, so `docker` doesn't work in sandboxed commands in either mode. Other sockets,
-  such as a forwarded SSH agent, do work in nested mode;
+  instead, so `docker` doesn't work in sandboxed commands in either mode. Other sockets
+  do work in nested mode;
 - sandboxed commands may create user namespaces of their own. The sandbox's mounts are
   locked inside them: unmasking the denied files or remounting read-only paths writable
   is refused (tested).

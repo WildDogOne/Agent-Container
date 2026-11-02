@@ -137,9 +137,11 @@ per-machine config like `run.local.sh`, copy `config\run.local.ps1.example` to
 - **No UID/GID remap.** Windows has no UIDs, and Docker Desktop lets any container user
   write to mounted Windows folders. To force a remap anyway, set `CONTAINER_UID` and
   `CONTAINER_GID`.
-- **No SSH agent forwarding.** The Windows OpenSSH agent is a named pipe, which can't be
-  passed into a Linux container. Inside the container, use HTTPS remotes with `gh auth
-  login` instead.
+- **No git-over-SSH.** SSH agent forwarding was removed from both ports by design
+  (outbound :22 is firewalled in the container; pushing is a host-side operation) -
+  and the Windows OpenSSH agent is a named pipe, which couldn't be mounted into a
+  Linux container anyway. Inside the container, use HTTPS remotes with `gh auth
+  login`.
 - **No `--sysbox`.** Sysbox can't be installed in Docker Desktop's VM, so `--with-docker`
   always uses `--privileged` there. That's privileged inside Docker Desktop's VM, not
   over Windows itself.

@@ -17,7 +17,8 @@
 # here, not forwarded on). Only needed when the host's own network setup - e.g. a
 # corporate VPN - blocks the bridge network from reaching DNS/the internet; see
 # README.md. `--host-network` shares the host's network namespace outright, so treat it
-# as an opt-in trade of isolation for connectivity, not a default. Run `run.sh --help`
+# as an opt-in trade of isolation for connectivity, not a default - it also skips the
+# nftables egress firewall entrypoint.sh normally installs. Run `run.sh --help`
 # for a summary of flags and this machine's resolved config (mounts, network mode).
 #
 # `--allow-list <path>` (consumed here, not forwarded on) swaps the squid egress
@@ -380,13 +381,17 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
   --host-network    Share the host's network namespace instead of Docker's default
                     bridge network. Only needed if the host's network (e.g. a
                     corporate VPN) blocks the bridge network from reaching the
-                    internet. Consumed here, never forwarded to docker/the harness.
+                    internet: it also gives the container unrestricted access to
+                    every host service on 127.0.0.1 and skips the nftables egress
+                    firewall (it would alter the host's ruleset). Consumed here,
+                    never forwarded to docker/the harness.
   --allow-list PATH Replace the squid egress allowlist for this session only, with
                     PATH (one domain per line, same format as allowed-domains.txt).
                     Doesn't touch the image or other sessions. Consumed here, never
                     forwarded to docker/the harness.
-  --allow-internet  Drop squid's domain and port allowlists for this session only -
-                    any host (bare IPs too) on any port, still proxied and logged. Mutually exclusive with --allow-list.
+  --allow-internet  Full internet for this session only: drops squid's domain and port
+                    allowlists AND the nftables egress firewall - any host (bare IPs
+                    too) on any port, proxied or direct. Mutually exclusive with --allow-list.
                     Consumed here, never forwarded to docker/the harness.
   --mount SPEC      Add one extra bind mount for this session only. A bare PATH mounts
                     read-write at that same path on both sides; use host:container[:ro]
@@ -446,7 +451,7 @@ Effective config on this machine:
   Image:          $image
   Network:        $([[ "$host_network" -eq 1 ]] && echo "host (--host-network passed)" || echo "bridge (default; pass --host-network to change)")
   Runtime:        $([[ "$allow_container" -eq 1 ]] && echo "plain runc, unprivileged (host socket mounted; no nested dockerd to privilege)" || { [[ "$with_docker" -eq 1 ]] && { [[ "$sysbox" -eq 1 ]] && echo "sysbox-runc (--sysbox passed)" || { docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc && echo "sysbox-runc (auto: registered on this host)" || echo "--privileged (--with-docker; install sysbox-runc for user-namespace isolation instead)"; }; } || echo "plain runc, unprivileged (default; pass --with-docker for a nested dockerd)"; })
-  Allowlist:      $([[ "$allow_internet" -eq 1 ]] && echo "DISABLED (--allow-internet passed - any host reachable via the proxy)" || { [[ -n "$allow_list" ]] && echo "$allow_list (--allow-list passed, overrides image default)" || echo "image default (allowed-domains.txt baked in at build; pass --allow-list to override)"; })
+  Allowlist:      $([[ "$allow_internet" -eq 1 ]] && echo "DISABLED (--allow-internet passed - any host/port reachable, nftables egress firewall also off)" || { [[ -n "$allow_list" ]] && echo "$allow_list (--allow-list passed, overrides image default)" || echo "image default (allowed-domains.txt baked in at build; pass --allow-list to override)"; })
   Docker socket:  $([[ "$allow_container" -eq 1 ]] && echo "HOST /var/run/docker.sock (--allow-container passed - root-equivalent host access)" || { [[ "$with_docker" -eq 1 ]] && echo "nested dockerd in the container (--with-docker passed)" || echo "none (default; pass --with-docker for a nested dockerd, --allow-container for the host daemon)"; })
   Harness config: $([[ "$allow_config" -eq 1 ]] && echo "WRITABLE (--allow-config passed - edits persist on the host)" || echo "read-only (default; pass --allow-config to let the harness change it)")
   dev UID:GID:    $remap_desc
@@ -480,11 +485,7 @@ EOF
       echo "    $HOME/$entry -> copied in from a ro mount (edits discarded on exit)"
     done
   fi
-  if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]]; then
-    echo "    $SSH_AUTH_SOCK -> $SSH_AUTH_SOCK (SSH_AUTH_SOCK, agent forwarding)"
-  else
-    echo "    (no SSH_AUTH_SOCK on host - no agent forwarding)"
-  fi
+  echo "    (no git-over-SSH: agent forwarding is gone by design - use HTTPS remotes / gh auth inside)"
   if [[ ${#EXTRA_MOUNTS[@]} -gt 0 ]]; then
     for mount in "${EXTRA_MOUNTS[@]}"; do
       echo "    $mount (from config/run.local.sh)"
@@ -602,7 +603,16 @@ elif [[ "$with_docker" -eq 1 ]]; then
 fi
 
 if [[ "$host_network" -eq 1 ]]; then
-  docker_args+=(--network host)
+  echo "run.sh: WARNING: --host-network shares the HOST's network namespace: the" >&2
+  echo "run.sh: container reaches every host service on 127.0.0.1, the nftables egress" >&2
+  echo "run.sh: firewall is NOT installed (it would alter the host's ruleset), and" >&2
+  echo "run.sh: NET_ADMIN is not added. Only for VPNs that block the bridge network." >&2
+  docker_args+=(--network host -e "AGENTCONTAINER_HOST_NETWORK=1")
+else
+  # The nftables egress firewall in entrypoint.sh needs NET_ADMIN. It's scoped to the
+  # container's own network namespace (never the host's), and only root PID 1 holds it -
+  # dev has no sudo to pick it up.
+  docker_args+=(--cap-add NET_ADMIN)
 fi
 
 # entrypoint.sh overwrites the image's baked-in allowed-domains.txt with this file
@@ -634,12 +644,6 @@ if [[ -n "$env_file" ]]; then
   if [[ -n "$env_keys" ]]; then
     docker_args+=(-e "AGENTCONTAINER_ENV_KEYS=$env_keys")
   fi
-fi
-
-# Forwards the host's ssh-agent for outbound git SSH auth (no private keys copied in).
-# No-op if SSH_AUTH_SOCK isn't set - git-over-SSH just won't have agent-forwarded keys.
-if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK}" ]]; then
-  docker_args+=(-v "$SSH_AUTH_SOCK:$SSH_AUTH_SOCK" -e "SSH_AUTH_SOCK=$SSH_AUTH_SOCK")
 fi
 
 if [[ ${#EXTRA_MOUNTS[@]} -gt 0 ]]; then
