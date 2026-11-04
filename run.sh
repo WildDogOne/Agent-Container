@@ -44,6 +44,17 @@
 # untouched. Mutually exclusive with --allow-list (one drops the list, the other swaps
 # it - combining them is almost certainly not what you meant).
 #
+# `--squid-logs` / `--no-squid-logs` (consumed here, not forwarded on) save this
+# session's squid logs (access, cache, stderr) to the host instead of letting them die
+# with the container: a per-session directory under
+# ~/.local/state/agentcontainer/logs/<timestamp>-<harness>/ (override the base with
+# --squid-logs=<path> or SQUID_LOG_DIR in run.local.sh) is bind-mounted at
+# /var/log/agentcontainer and entrypoint.sh mirrors the logs into it as dev, so the
+# files are owned by the host user. squid itself keeps writing to /tmp: it opens its log
+# files as root before dropping privileges, which would land root-owned files on the
+# host. SQUID_LOGS=1 in run.local.sh makes it the default; --no-squid-logs overrides
+# that for one session.
+#
 # `--allow-container` (consumed here, not forwarded on) bind-mounts the HOST's own Docker
 # socket (/var/run/docker.sock) into the container, instead of the nested dockerd
 # `--with-docker` would otherwise start inside it. Containers started this way are
@@ -118,6 +129,8 @@ cli_bash_sandbox=0
 cli_no_bash_sandbox=0
 cli_env_file=""
 no_env_file=0
+cli_squid_logs=""   # "" = not passed, "1" = --squid-logs, "0" = --no-squid-logs
+cli_squid_log_dir=""
 cli_mounts=()
 args=()
 while [[ $# -gt 0 ]]; do
@@ -134,6 +147,17 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --no-env-file) no_env_file=1; shift ;;
+    --squid-logs) cli_squid_logs=1; shift ;;
+    --squid-logs=*)
+      cli_squid_logs=1
+      cli_squid_log_dir="${1#*=}"
+      if [[ -z "$cli_squid_log_dir" ]]; then
+        echo "run.sh: --squid-logs= requires a path (or use plain --squid-logs for the default)" >&2
+        exit 1
+      fi
+      shift
+      ;;
+    --no-squid-logs) cli_squid_logs=0; shift ;;
     -h|--help) show_help=1; shift ;;
     --allow-internet) allow_internet=1; shift ;;
     --allow-container) allow_container=1; shift ;;
@@ -221,6 +245,8 @@ CONTAINER_GID="${CONTAINER_GID:-}"
 BASH_SANDBOX="${BASH_SANDBOX:-}"
 WITH_DOCKER="${WITH_DOCKER:-}"
 ENV_FILE="${ENV_FILE:-}"
+SQUID_LOGS="${SQUID_LOGS:-}"
+SQUID_LOG_DIR="${SQUID_LOG_DIR:-}"
 if [[ -f "$script_dir/config/run.local.sh" ]]; then
   . "$script_dir/config/run.local.sh"
 fi
@@ -237,6 +263,30 @@ if [[ ! -f "$harness_conf_file" ]]; then
   exit 1
 fi
 image="agentcontainer:$harness"
+
+# Squid logs to the host: --squid-logs / --no-squid-logs override SQUID_LOGS=1 in
+# run.local.sh (see the header comment). The per-session directory name carries a
+# timestamp and the harness so sessions are greppable/ sortable afterwards; a second
+# session started in the same second gets the PID appended. The directory is only
+# created on the real (non---help) path below.
+squid_logs=0
+squid_log_dir=""
+if [[ "$cli_squid_logs" == 0 ]]; then
+  squid_logs_desc="off (--no-squid-logs passed)"
+elif [[ "$cli_squid_logs" == 1 ]]; then
+  squid_logs=1
+elif [[ "$SQUID_LOGS" == 1 ]]; then
+  squid_logs=1
+  squid_logs_desc="on (SQUID_LOGS=1)"
+fi
+if [[ "$squid_logs" -eq 1 ]]; then
+  squid_log_base="${cli_squid_log_dir:-$SQUID_LOG_DIR}"
+  # expand a leading ~ typed as --squid-logs=~/... (bash doesn't in that position)
+  squid_log_base="${squid_log_base/#~/$HOME}"
+  [[ -z "$squid_log_base" ]] && squid_log_base="$HOME/.local/state/agentcontainer/logs"
+  squid_log_dir="$squid_log_base/$(date +%Y-%m-%d-%H%M%S)-$harness"
+  [[ -e "$squid_log_dir" ]] && squid_log_dir="$squid_log_dir-$$"
+fi
 
 # See harnesses/README.md for the keys. Space-separated lists; last line wins.
 harness_conf() { sed -n "s/^$1=//p" "$harness_conf_file" | tail -n 1; }
@@ -370,6 +420,7 @@ Usage: run.sh [--harness <name>] [--host-network] [--allow-list <path> | --allow
               [--allow-container | --with-docker [--sysbox]] [--allow-config]
               [--mount <path|host:container[:ro]>]...
               [--no-bash-sandbox] [--env-file <path> | --no-env-file]
+              [--squid-logs[=<path>] | --no-squid-logs]
               [-h|--help] [harness-args... | command...]
 
 Launches a fresh, disposable sandbox container scoped to \$PWD. Only \$PWD and the
@@ -441,6 +492,15 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
   --no-env-file     Pass no env file this session, not even the default (ENV_FILE=off
                     in run.local.sh does the same permanently). Consumed here, never
                     forwarded to docker/the harness.
+  --squid-logs      Save this session's squid logs (access, cache, stderr) to the host,
+                    in ~/.local/state/agentcontainer/logs/<timestamp>-<harness>/
+                    (--squid-logs=<path> or SQUID_LOG_DIR in run.local.sh changes the
+                    base dir). entrypoint.sh mirrors them out of the container; the
+                    files end up owned by you. SQUID_LOGS=1 in run.local.sh makes it
+                    the default. Consumed here, never forwarded to docker/the harness.
+  --no-squid-logs   Don't save the squid logs this session, even with SQUID_LOGS=1 set
+                    (they stay in the container's /tmp and die with it). Consumed here,
+                    never forwarded to docker/the harness.
 
 Anything else starting with '-' is forwarded to the harness itself (e.g. --continue).
 A bare command (e.g. \`run.sh bash\`) overrides the harness's default command
@@ -457,6 +517,7 @@ Effective config on this machine:
   dev UID:GID:    $remap_desc
   Bash sandbox:   $bash_sandbox_desc
   Env file:       $([[ -n "$env_file" ]] && echo "$env_file ($env_file_desc: ${env_keys:-no variables})" || echo "$env_file_desc")
+  Squid logs:     $([[ "$squid_logs" -eq 1 ]] && echo "$squid_log_dir (mirrored to the host)" || echo "${squid_logs_desc:-container-only (/tmp, discarded on exit; --squid-logs or SQUID_LOGS=1 to save them)}")
   Mounts:
     $PWD -> $PWD
 EOF
@@ -625,6 +686,22 @@ fi
 # see entrypoint.sh.
 if [[ "$allow_internet" -eq 1 ]]; then
   docker_args+=(-e "SQUID_ALLOW_INTERNET=1")
+fi
+
+# entrypoint.sh mirrors squid's /tmp logs into this read-write per-session mount (see
+# the header comment). Created here, not at resolution time, so --help doesn't leave an
+# empty directory behind.
+if [[ "$squid_logs" -eq 1 ]]; then
+  if ! mkdir -p "$squid_log_dir" 2>/dev/null; then
+    echo "run.sh: can't create the squid log dir $squid_log_dir - if a parent of it is root-owned (an older docker run creating a missing mount source as root), repair with: sudo chown -R \"\$USER\": \"$squid_log_base\"" >&2
+    exit 1
+  fi
+  docker_args+=(-v "$squid_log_dir:/var/log/agentcontainer")
+  # Also mount the base itself rw at the same path, so a run.sh started from *inside*
+  # a sandbox can create its own session dir there: without it the default base's
+  # parents in the container are just Docker's root-owned mount scaffolding, not the
+  # host's real log tree.
+  docker_args+=(-v "$squid_log_base:$squid_log_base")
 fi
 
 # entrypoint.sh starts the harness's sandboxed_command instead of its command (or the

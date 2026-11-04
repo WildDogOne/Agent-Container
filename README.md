@@ -165,6 +165,8 @@ harness. They can go anywhere in the argument list:
 | `--no-bash-sandbox`                      | Don't start the harness's `sandboxed_command` even if it has one. It's the default for harnesses that define one; for Claude Code: its own Bash sandbox on top of the container, see [below](#bash-sandbox). |
 | `--env-file FILE`                        | Pass the variables in `FILE` (docker env file) into the session, e.g. MCP tokens. See [below](#secrets-for-mcp-servers).            |
 | `--no-env-file`                          | Pass no env file, not even the default `~/.config/agentcontainer.env`.                                                              |
+| `--squid-logs[=PATH]`                    | Save this session's squid logs (access, cache, stderr) to the host, in `~/.local/state/agentcontainer/logs/<timestamp>-<harness>/` (`PATH`, or `SQUID_LOG_DIR` in `run.local.sh`, changes the base dir). See [Network egress](#network-egress). |
+| `--no-squid-logs`                        | Don't save the squid logs this session, even with `SQUID_LOGS=1` set.                                                                |
 
 ```sh
 run.sh --mount ~/data --mount ~/models:/models:ro --continue
@@ -180,7 +182,7 @@ Per-machine settings live in `config/`. Each file there is gitignored and has a 
 |---|---|---|
 | `config/allowed-domains.txt` | `build.sh` | Extra domains to allow, on top of the defaults. See [Network egress](#network-egress). |
 | `config/extra-setup.sh` | `build.sh` | Extra packages or tools baked into the image. See [Customizing the image](#customizing-the-image). |
-| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`), nested Docker by default (`WITH_DOCKER=1`), Bash sandbox off (`BASH_SANDBOX=0`), env file (`ENV_FILE=`). |
+| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`), nested Docker by default (`WITH_DOCKER=1`), Bash sandbox off (`BASH_SANDBOX=0`), env file (`ENV_FILE=`), squid logs to the host (`SQUID_LOGS=1`, `SQUID_LOG_DIR=`). |
 | `config/run.local.ps1` | `run.ps1` | The same for Windows. |
 
 **Rebuild with `./build.sh` after changing anything in `image/`, `harnesses/`,
@@ -358,7 +360,14 @@ For Claude Code, the [Bash sandbox](#bash-sandbox) (on by default) adds the harn
 own network/ filesystem restrictions on top.
 
 Blocked requests are logged in `/tmp/squid-access.log` inside the container. Read it with
-`tail /tmp/squid-access.log` when something fails to download.
+`tail /tmp/squid-access.log` when something fails to download. Those logs die with the
+container; `run.sh --squid-logs` (or `SQUID_LOGS=1` in `config/run.local.sh`) mirrors
+access, cache and stderr logs into a per-session host directory
+(`~/.local/state/agentcontainer/logs/<timestamp>-<harness>/` on Linux,
+`%LOCALAPPDATA%\agentcontainer\logs\...` on Windows) for later analysis. They cover
+proxied traffic only - not nested containers' egress under `--with-docker`. Squid
+buffers its access log, so entries can lag a few seconds and the last few may be lost
+if the session exits right after a request.
 
 `--host-network` swaps isolation for connectivity, for example behind a corporate VPN
 that only routes the host's own traffic. Only use it when the bridge network can't reach
@@ -569,7 +578,8 @@ parents, and activates the first one it finds. Nothing creates the venv for you:
 - **A change to the image has no effect:** rebuild with `./build.sh`.
 - **A download or API call is blocked:** run `tail /tmp/squid-access.log` inside
   the container to see which domain was refused, then use `--allow-list` or add it to
-  `config/allowed-domains.txt`.
+  `config/allowed-domains.txt`. Start with `--squid-logs` (or `SQUID_LOGS=1` in
+  `config/run.local.sh`) to keep the logs on the host after the session ends.
 - **`cache-miss` on `/reload-plugins`:** make sure you started through `run.sh`, which
   keeps `$HOME` in the container the same as on the host. A bare `docker run` doesn't.
 

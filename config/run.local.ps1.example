@@ -32,3 +32,12 @@ $EXTRA_MOUNTS = @(
 # Docker env file passed into every session (--env-file overrides it). Defaults to
 # %USERPROFILE%\.config\agentcontainer.env if it exists; 'off' passes none:
 # $ENV_FILE = "$env:USERPROFILE\.config\agentcontainer.env"
+
+# Save every session's squid logs (access, cache, stderr) to the host instead of
+# letting them die with the container: a per-session directory under
+# %LOCALAPPDATA%\agentcontainer\logs\<timestamp>-<harness>\ gets mirrored into by
+# entrypoint.sh. Set $SQUID_LOG_DIR to keep them somewhere else. --squid-logs enables
+# this for one session, --no-squid-logs disables it even with $SQUID_LOGS = 1 set here.
+# See README.md.
+# $SQUID_LOGS = '1'
+# $SQUID_LOG_DIR = "$env:USERPROFILE\Logs\agentcontainer"

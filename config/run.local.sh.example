@@ -45,3 +45,12 @@ EXTRA_MOUNTS=(
 # outside the repo and chmod 600. See README.md. ~/.config/agentcontainer.env is used
 # without this if it exists; set a different path here, or off to pass none.
 # ENV_FILE="$HOME/.config/agentcontainer.env"
+
+# Save every session's squid logs (access, cache, stderr) to the host instead of
+# letting them die with the container: a per-session directory under
+# ~/.local/state/agentcontainer/logs/<timestamp>-<harness>/ gets mirrored into by
+# entrypoint.sh. Set SQUID_LOG_DIR to keep them somewhere else. --squid-logs enables
+# this for one session, --no-squid-logs disables it even with SQUID_LOGS=1 set here.
+# See README.md.
+# SQUID_LOGS=1
+# SQUID_LOG_DIR="$HOME/Logs/agentcontainer"

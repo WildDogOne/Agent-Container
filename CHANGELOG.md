@@ -7,6 +7,20 @@ the change takes effect.
 
 ## Unreleased
 
+### Added
+
+- `run.sh`/`run.ps1` **`--squid-logs[=PATH]` / `--no-squid-logs`**: mirror the session's
+  squid access/cache/stderr logs out of the container into a per-session host directory
+  (`~/.local/state/agentcontainer/logs/<timestamp>-<harness>/` on Linux,
+  `%LOCALAPPDATA%\agentcontainer\logs\...` on Windows; base dir via `PATH` or
+  `SQUID_LOG_DIR`), mounted read-write at `/var/log/agentcontainer`. `entrypoint.sh`
+  tails the three `/tmp` files as `dev` into the mount, so the copies are host-user
+  owned (squid itself would open them as root); squid's own config is unchanged.
+  The base dir is additionally mounted read-write at its own path, so a `run.sh`
+  started from inside a sandbox can write its sessions' logs into the host tree too.
+  `SQUID_LOGS=1` in `config/run.local.sh`/`.ps1` makes it the default. **rebuild**
+  (`image/entrypoint.sh`); the run scripts apply without one.
+
 ### Changed
 
 - Egress is now **enforced, not just proxied**: `entrypoint.sh` installs an nftables

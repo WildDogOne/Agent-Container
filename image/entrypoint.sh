@@ -94,6 +94,21 @@ sleep 1
 # world-readable instead.
 chmod a+r /tmp/squid-access.log /tmp/squid-cache.log 2>/dev/null || true
 
+# run.sh --squid-logs (or SQUID_LOGS=1 in run.local.sh) bind-mounts a per-session host
+# directory at /var/log/agentcontainer, read-write; the mount's presence is the switch
+# (a plain `docker run` without it is unaffected). squid itself keeps logging to /tmp:
+# it opens its log files as root before the privilege drop below, so pointing squid at
+# the mount directly would leave root-owned files in the host user's log dir. Mirror
+# them out through a dev-owned tail instead - dev's UID is the host user's (remapped
+# above), so the copies are host-owned from the first line. The >> redirection must
+# happen inside `sudo -u dev`, not in this root shell, for the same reason. -F waits
+# for the files to appear and follows them through rotation.
+if [ -d /var/log/agentcontainer ]; then
+  for logfile in squid-access squid-cache squid; do
+    nohup sudo -u dev sh -c "tail -F '/tmp/$logfile.log' >> '/var/log/agentcontainer/$logfile.log'" >/dev/null 2>&1 &
+  done
+fi
+
 # run.sh --allow-container bind-mounts the HOST's own docker.sock at this same path,
 # so starting our own nested dockerd here would just fail to bind it. Instead, give dev
 # access to the mounted socket by joining the group that owns it on the host - dev's own

@@ -105,6 +105,8 @@ $cliBashSandbox = $false
 $cliNoBashSandbox = $false
 $cliEnvFile = ''
 $noEnvFile = $false
+$cliSquidLogs = ''   # '' = not passed, 'on' = --squid-logs, 'off' = --no-squid-logs
+$cliSquidLogDir = ''
 $cliMounts = New-Object System.Collections.Generic.List[string]
 $forward = New-Object System.Collections.Generic.List[string]
 
@@ -126,6 +128,14 @@ while ($i -lt $cliArgs.Count) {
       $cliEnvFile = [string]$cliArgs[$i + 1]; $i += 2; continue
     }
     '--no-env-file'     { $noEnvFile = $true; $i++; continue }
+    '--squid-logs'      { $cliSquidLogs = 'on'; $i++; continue }
+    '--no-squid-logs'   { $cliSquidLogs = 'off'; $i++; continue }
+    { $_ -like '--squid-logs=*' } {
+      $cliSquidLogs = 'on'
+      $cliSquidLogDir = $a.Substring('--squid-logs='.Length)
+      if (-not $cliSquidLogDir) { Fail '--squid-logs= requires a path (or use plain --squid-logs for the default)' }
+      $i++; continue
+    }
     '--harness' {
       if ($i + 1 -ge $cliArgs.Count) { Fail '--harness requires a harness name' }
       $cliHarness = [string]$cliArgs[$i + 1]; $i += 2; continue
@@ -179,6 +189,8 @@ $CONTAINER_GID = $env:CONTAINER_GID
 $BASH_SANDBOX = $env:BASH_SANDBOX
 $WITH_DOCKER = $env:WITH_DOCKER
 $ENV_FILE = $env:ENV_FILE
+$SQUID_LOGS = $env:SQUID_LOGS
+$SQUID_LOG_DIR = $env:SQUID_LOG_DIR
 $localConfig = Join-Path $PSScriptRoot 'config\run.local.ps1'
 if (Test-Path $localConfig) { . $localConfig }
 
@@ -194,6 +206,28 @@ if (-not (Test-Path -LiteralPath $harnessConfFile -PathType Leaf)) {
   Fail "unknown harness '$harnessName' (no $harnessConfFile)"
 }
 $image = "agentcontainer:$harnessName"
+
+# Squid logs to the host: --squid-logs / --no-squid-logs override $SQUID_LOGS = 1 in
+# run.local.ps1 (see run.sh's header comment for the mechanism). The per-session
+# directory name carries a timestamp and the harness so sessions are greppable/
+# sortable afterwards; a second session started in the same second gets the PID
+# appended. The directory is only created on the real (non-help) path below.
+$squidLogs = $false
+$squidLogDir = ''
+$squidLogsDesc = ''
+if ($cliSquidLogs -eq 'off') {
+  $squidLogsDesc = 'off (--no-squid-logs passed)'
+} elseif ($cliSquidLogs -eq 'on' -or [string]$SQUID_LOGS -eq '1') {
+  $squidLogs = $true
+  $squidLogBase = ''
+  if ($cliSquidLogDir) { $squidLogBase = $cliSquidLogDir }
+  elseif ($SQUID_LOG_DIR) { $squidLogBase = [string]$SQUID_LOG_DIR }
+  # %LOCALAPPDATA% is the Windows counterpart of XDG's ~/.local/state.
+  if ($squidLogBase) { $squidLogBase = Resolve-HostPath $squidLogBase }
+  else { $squidLogBase = Join-Path $env:LOCALAPPDATA 'agentcontainer\logs' }
+  $squidLogDir = Join-Path $squidLogBase ((Get-Date -Format 'yyyy-MM-dd-HHmmss') + '-' + $harnessName)
+  if (Test-Path -LiteralPath $squidLogDir) { $squidLogDir = "$squidLogDir-$PID" }
+}
 
 # See harnesses\README.md for the keys. Space-separated lists; last line wins.
 function Get-HarnessConf([string]$key) {
@@ -307,6 +341,7 @@ Usage: run.ps1 [--harness <name>] [--host-network] [--allow-list <path> | --allo
                [--allow-container | --with-docker] [--allow-config]
                [--mount <path|host:container[:ro]>]...
                [--no-bash-sandbox] [--env-file <path> | --no-env-file]
+               [--squid-logs[=<path>] | --no-squid-logs]
                [-h|--help] [harness-args... | command...]
 
 Windows/Docker Desktop version of run.sh - same flags, see run.sh --help or README.md
@@ -330,6 +365,7 @@ Effective config on this machine:
   dev UID:GID:    $remapDesc
   Bash sandbox:   $bashSandboxDesc
   Env file:       $envDesc
+  Squid logs:     $(if ($squidLogs) { "$squidLogDir (mirrored to the host)" } elseif ($squidLogsDesc) { $squidLogsDesc } else { 'container-only (/tmp, discarded on exit; --squid-logs or $SQUID_LOGS = 1 to save them)' })
   Mounts:
     $projectDir -> $projectTarget
 "@ | Write-Host
@@ -450,6 +486,21 @@ if ($allowList) {
   Add-Bind $allowList '/etc/squid/allowed-domains.override.txt' -ReadOnly
 }
 if ($allowInternet) { $dockerArgs.AddRange([string[]]@('-e', 'SQUID_ALLOW_INTERNET=1')) }
+
+# entrypoint.sh mirrors squid's /tmp logs into this read-write per-session mount (see
+# run.sh's header comment). Created here, not at resolution time, so --help doesn't
+# leave an empty directory behind.
+if ($squidLogs) {
+  try {
+    New-Item -ItemType Directory -Force -Path $squidLogDir | Out-Null
+  } catch {
+    Fail "can't create the squid log dir $squidLogDir - if a parent of it is root-owned (an older docker run creating a missing mount source as root), repair it from a WSL/Linux shell: sudo chown -R `"`$USER `" <that parent>"
+  }
+  Add-Bind $squidLogDir '/var/log/agentcontainer'
+  # Also mount the base itself rw at the same path, so a run.sh started from *inside*
+  # a sandbox can create its own session dir there (see run.sh).
+  Add-Bind $squidLogBase (ConvertTo-ContainerPath $squidLogBase)
+}
 
 # Docker Desktop exposes its daemon socket at /var/run/docker.sock inside its VM, so the
 # Linux-style path is right even from a Windows CLI. -v rather than Add-Bind: the source
