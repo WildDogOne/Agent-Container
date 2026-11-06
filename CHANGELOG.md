@@ -13,6 +13,14 @@ the change takes effect.
   `"bytes"` - the true size before redaction/truncation. Previously a buffered text
   body over the 64K log cap was counted at its truncated length, so `flowlog`'s
   `out`/`in` byte columns undercounted large request bodies (LLM prompts).
+- `tools/flowlog.py`: host-side analysis of the `--proxy-logs` session logs (stdlib-only
+  Python). `flowlog` summarizes the newest session (hosts, status codes, denials, bytes);
+  `hosts`, `flows`, `show N`, `grep PAT`, `errors` and `denies` dig in. Takes a log file,
+  a session dir/name, or nothing (newest under `~/.local/state/agentcontainer/logs/`);
+  `--all` merges every session in that directory (per-session overview, session column).
+  Tables are aligned with box-drawing borders; `--sort COL` / `--desc` order them by any
+  column (numeric largest-first by default); byte counts split into `out` (requests
+  sent) and `in` (responses received).
 - `build.sh`/`build.ps1` **`--cached`**: reuse Docker's layer cache instead of the
   default `--no-cache` - fast when only this repo's own files changed. The Dockerfile now
   copies `entrypoint.sh` and the proxy addon last, so editing them doesn't rerun any

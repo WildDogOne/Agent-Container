@@ -21,6 +21,8 @@ package manager. Everything is a shell script or config file consumed by
   in `harnesses/README.md`.
 - `config/` - personal, gitignored per-machine files, each seeded from a tracked
   `.example`: `run.local.sh`/`.ps1`, `extra-setup.sh`, `allowed-domains.txt`.
+- `tools/flowlog.py` - host-side analyzer for the `--proxy-logs` session logs
+  (`summary`/`hosts`/`flows`/`show`/`grep`/`errors`/`denies`); not baked into the image.
 - `lib/windows-common.ps1` - shared PowerShell helpers.
 
 **Keep harness specifics out of `image/`, `run.sh` and `run.ps1`.** If a new harness
