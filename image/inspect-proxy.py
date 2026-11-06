@@ -21,7 +21,8 @@ a byte count; so is every body in tunnel mode. Server-sent events (text/event-st
 and text bodies past entrypoint.sh's stream_large_bodies backstop are streamed too, with
 only the first MAX_BODY_LOG + SCAN_MARGIN bytes kept (decompressed for gzip/deflate) for
 the redacted log. Everything else (ordinary JSON/form/text bodies) is buffered as before,
-so the redactor can parse it.
+so the redactor can parse it. Every logged body dict carries "bytes": the body's true
+size, so a truncated "text" is still counted at full size by tools/flowlog.py.
 
 Allowlist file format (one entry per line, `#` comments):
   example.com        exact host
@@ -375,7 +376,10 @@ class AllowInspect:
             return None
         if not any(t in (ctype or "").lower() for t in TEXT_TYPES):
             return {"omitted": "non-text", "bytes": len(data)}
-        return redact_body(data, ctype)
+        out = redact_body(data, ctype)
+        if isinstance(out, dict):
+            out["bytes"] = len(data)  # true size, before redaction/truncation
+        return out
 
 
 addons = [AllowInspect()]

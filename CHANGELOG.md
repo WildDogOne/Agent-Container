@@ -9,6 +9,10 @@ the change takes effect.
 
 ### Added
 
+- `image/inspect-proxy.py` *(needs rebuild)*: every logged body dict now carries
+  `"bytes"` - the true size before redaction/truncation. Previously a buffered text
+  body over the 64K log cap was counted at its truncated length, so `flowlog`'s
+  `out`/`in` byte columns undercounted large request bodies (LLM prompts).
 - `build.sh`/`build.ps1` **`--cached`**: reuse Docker's layer cache instead of the
   default `--no-cache` - fast when only this repo's own files changed. The Dockerfile now
   copies `entrypoint.sh` and the proxy addon last, so editing them doesn't rerun any
