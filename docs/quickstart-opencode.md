@@ -114,7 +114,7 @@ flowchart LR
     subgraph ctr["Container (--rm, one per session)"]
         pid1["entrypoint.sh"]
         oc["opencode"]
-        squid["Squid Proxy"]
+        proxy["mitmproxy"]
     end
 
     allow["Allowlist"]
@@ -124,7 +124,7 @@ flowchart LR
     runsh -- "docker run" --> pid1
     image -- "starts from" --> pid1 --> oc
     mounts -.-> oc
-    oc -- "HTTPS_PROXY" --> squid --> allow --> internet
+    oc -- "HTTPS_PROXY" --> proxy --> allow --> internet
 ```
 
 - **Read-write:** your project, `~/.local/share/opencode` (sessions and credentials in
@@ -135,7 +135,7 @@ flowchart LR
 - **Not shared:** `~/.cache/opencode` holds the LSP servers and npm packages opencode
   downloads and executes. A writable mount would let a session plant code the host's
   opencode runs, so the container starts with an empty cache and fetches them again.
-- **Egress:** only through squid, to the domains in
+- **Egress:** only through the proxy, to the domains in
   `harnesses/opencode/allowed-domains.txt` plus the shared defaults.
 
 ## Common tweaks

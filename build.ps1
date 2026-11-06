@@ -5,7 +5,10 @@
 # Docker Desktop if it isn't up yet), since on Windows those are the usual reasons a
 # build fails before it even starts. setup.ps1 installs anything missing.
 #
-#   .\build.ps1 [harness...]
+#   .\build.ps1 [--cached] [harness...]
+#
+# --cached reuses Docker's layer cache instead of the default --no-cache (see build.sh):
+# fast when only this repo's own files changed, but nothing already cached is updated.
 #
 # If PowerShell refuses to run it ("running scripts is disabled on this system"), either
 # allow local scripts once per user:
@@ -17,7 +20,14 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
 # Captured first: dot-sourced helpers below get their own $args.
-$harnesses = @($args)
+$cacheFlag = '--no-cache'
+$harnesses = @()
+foreach ($a in @($args)) {
+  $a = [string]$a
+  if ($a -eq '--cached') { $cacheFlag = $null }
+  elseif ($a.StartsWith('-')) { Write-Error "unknown option '$a' (usage: .\build.ps1 [--cached] [harness...])"; exit 1 }
+  else { $harnesses += $a }
+}
 
 . (Join-Path $PSScriptRoot 'lib\windows-common.ps1')
 
@@ -61,9 +71,9 @@ try {
   }
 
   # CRLF line endings (a checkout with core.autocrlf=true, or a file saved in Notepad)
-  # would break the shell scripts and squid's domain list inside the Linux image. The
+  # would break the shell scripts and the proxy's allowlist inside the Linux image. The
   # Dockerfile strips them on COPY regardless; this just says so, so it isn't a surprise.
-  foreach ($f in @('image\entrypoint.sh', 'image\squid.conf', 'config\extra-setup.sh', 'config\allowed-domains.txt')) {
+  foreach ($f in @('image\entrypoint.sh', 'image\inspect-proxy.py', 'config\extra-setup.sh', 'config\allowed-domains.txt')) {
     if ([IO.File]::ReadAllText((Join-Path $PSScriptRoot $f)).Contains("`r`n")) {
       Write-Host "note: $f has CRLF line endings - converted to LF inside the image."
     }
@@ -72,12 +82,14 @@ try {
   # Repo root as the build context, same as build.sh.
   foreach ($h in $harnesses) {
     Write-Host "Building agentcontainer:$h"
-    & docker.exe build --no-cache -f image/Dockerfile --build-arg "HARNESS=$h" -t "agentcontainer:$h" .
+    $buildArgs = @('build')
+    if ($cacheFlag) { $buildArgs += $cacheFlag }
+    $buildArgs += @('-f', 'image/Dockerfile', '--build-arg', "HARNESS=$h", '-t', "agentcontainer:$h", '.')
+    & docker.exe @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "docker build failed for $h (exit code $LASTEXITCODE)." }
   }
 
-  # See build.sh: --no-cache dangles the previous agentcontainer:<harness> on every
-  # rebuild; the label scopes the prune to our own leftovers.
+  # See build.sh: a rebuild dangles the previous agentcontainer:<harness>; the label scopes the prune to our own leftovers.
   $null = Invoke-NativeQuiet docker.exe @('image', 'prune', '-f',
     '--filter', 'label=project=agentcontainer', '--filter', 'dangling=true')
 } finally {

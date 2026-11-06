@@ -105,14 +105,22 @@ $cliBashSandbox = $false
 $cliNoBashSandbox = $false
 $cliEnvFile = ''
 $noEnvFile = $false
-$cliSquidLogs = ''   # '' = not passed, 'on' = --squid-logs, 'off' = --no-squid-logs
-$cliSquidLogDir = ''
+$cliProxyLogs = ''   # '' = not passed, 'on' = --proxy-logs, 'off' = --no-proxy-logs
+$cliProxyLogDir = ''
+$cliInspect = ''     # '' = not passed, '1' = --inspect
 $cliMounts = New-Object System.Collections.Generic.List[string]
+$cliCaCerts = New-Object System.Collections.Generic.List[string]
 $forward = New-Object System.Collections.Generic.List[string]
 
 $i = 0
 while ($i -lt $cliArgs.Count) {
   $a = [string]$cliArgs[$i]
+  # Deprecated squid-era names (see run.sh): accepted with a warning.
+  if ($a -ceq '--squid-logs' -or $a -ceq '--no-squid-logs' -or $a.StartsWith('--squid-logs=', [StringComparison]::Ordinal)) {
+    $newArg = $a.Replace('squid-logs', 'proxy-logs')
+    [Console]::Error.WriteLine("run.ps1: warning: $a is deprecated, use $newArg")
+    $a = $newArg
+  }
   switch -CaseSensitive ($a) {
     '--host-network'    { $hostNetwork = $true; $i++; continue }
     { $_ -eq '-h' -or $_ -eq '--help' } { $showHelp = $true; $i++; continue }
@@ -128,14 +136,15 @@ while ($i -lt $cliArgs.Count) {
       $cliEnvFile = [string]$cliArgs[$i + 1]; $i += 2; continue
     }
     '--no-env-file'     { $noEnvFile = $true; $i++; continue }
-    '--squid-logs'      { $cliSquidLogs = 'on'; $i++; continue }
-    '--no-squid-logs'   { $cliSquidLogs = 'off'; $i++; continue }
-    { $_ -like '--squid-logs=*' } {
-      $cliSquidLogs = 'on'
-      $cliSquidLogDir = $a.Substring('--squid-logs='.Length)
-      if (-not $cliSquidLogDir) { Fail '--squid-logs= requires a path (or use plain --squid-logs for the default)' }
+    '--proxy-logs'      { $cliProxyLogs = 'on'; $i++; continue }
+    '--no-proxy-logs'   { $cliProxyLogs = 'off'; $i++; continue }
+    { $_ -like '--proxy-logs=*' } {
+      $cliProxyLogs = 'on'
+      $cliProxyLogDir = $a.Substring('--proxy-logs='.Length)
+      if (-not $cliProxyLogDir) { Fail '--proxy-logs= requires a path (or use plain --proxy-logs for the default)' }
       $i++; continue
     }
+    '--inspect'         { $cliInspect = '1'; $i++; continue }
     '--harness' {
       if ($i + 1 -ge $cliArgs.Count) { Fail '--harness requires a harness name' }
       $cliHarness = [string]$cliArgs[$i + 1]; $i += 2; continue
@@ -147,6 +156,10 @@ while ($i -lt $cliArgs.Count) {
     '--mount' {
       if ($i + 1 -ge $cliArgs.Count) { Fail '--mount requires a host path, or host:container[:ro], argument' }
       $cliMounts.Add([string]$cliArgs[$i + 1]); $i += 2; continue
+    }
+    '--ca-cert' {
+      if ($i + 1 -ge $cliArgs.Count) { Fail '--ca-cert requires a host path to a CA certificate file' }
+      $cliCaCerts.Add([string]$cliArgs[$i + 1]); $i += 2; continue
     }
     default { $forward.Add($a); $i++ }
   }
@@ -182,19 +195,41 @@ $homeTarget = ConvertTo-ContainerPath $hostHome
 # config\run.local.ps1: $EXTRA_CONFIG_RO_PATHS += '.claude/statusline.ps1'
 $EXTRA_MOUNTS = @()
 $EXTRA_CONFIG_RO_PATHS = @()
+# Additional root CA cert files (host paths) to import into the container's trust store
+# at session start - see --ca-cert. run.local.ps1 can list personal defaults; --ca-cert
+# adds to them per session.
+$CA_CERTS = @()
 $HARNESS = $env:HARNESS
 if (-not $HARNESS) { $HARNESS = 'claude' }
 $CONTAINER_UID = $env:CONTAINER_UID
 $CONTAINER_GID = $env:CONTAINER_GID
-$BASH_SANDBOX = $env:BASH_SANDBOX
-$WITH_DOCKER = $env:WITH_DOCKER
 $ENV_FILE = $env:ENV_FILE
-$SQUID_LOGS = $env:SQUID_LOGS
-$SQUID_LOG_DIR = $env:SQUID_LOG_DIR
+# Not seeded from the environment (see run.sh): nested Docker, the Bash sandbox switch,
+# TLS interception and log mirroring count only when run.local.ps1 or a flag sets them.
+$WITH_DOCKER = $null
+$BASH_SANDBOX = $null
+$PROXY_LOGS = $null
+$PROXY_LOG_DIR = $null
+$INSPECT = $null
 $localConfig = Join-Path $PSScriptRoot 'config\run.local.ps1'
 if (Test-Path $localConfig) { . $localConfig }
+# Deprecated squid-era settings (run.local.ps1 only, like the new names), see run.sh.
+$oldSquidLogs = Get-Variable -Name SQUID_LOGS -ValueOnly -ErrorAction SilentlyContinue
+if ($oldSquidLogs) {
+  [Console]::Error.WriteLine('run.ps1: warning: SQUID_LOGS is deprecated, rename it to PROXY_LOGS (config\run.local.ps1)')
+  if (-not $PROXY_LOGS) { $PROXY_LOGS = $oldSquidLogs }
+}
+$oldSquidLogDir = Get-Variable -Name SQUID_LOG_DIR -ValueOnly -ErrorAction SilentlyContinue
+if ($oldSquidLogDir) {
+  [Console]::Error.WriteLine('run.ps1: warning: SQUID_LOG_DIR is deprecated, rename it to PROXY_LOG_DIR (config\run.local.ps1)')
+  if (-not $PROXY_LOG_DIR) { $PROXY_LOG_DIR = $oldSquidLogDir }
+}
 
-if ([string]$WITH_DOCKER -eq '1') { $withDocker = $true }
+$withDockerSrc = '--with-docker passed'
+if (-not $withDocker -and [string]$WITH_DOCKER -eq '1') {
+  $withDocker = $true
+  $withDockerSrc = '$WITH_DOCKER = 1 in run.local.ps1'
+}
 if ($allowContainer -and $withDocker) {
   Fail '--allow-container and --with-docker (or $WITH_DOCKER = 1 in run.local.ps1) are mutually exclusive'
 }
@@ -207,26 +242,31 @@ if (-not (Test-Path -LiteralPath $harnessConfFile -PathType Leaf)) {
 }
 $image = "agentcontainer:$harnessName"
 
-# Squid logs to the host: --squid-logs / --no-squid-logs override $SQUID_LOGS = 1 in
+# TLS interception: --inspect overrides $INSPECT = 1 in run.local.ps1. Off by
+# default - see run.sh's header comment for why.
+$inspect = $cliInspect -eq '1' -or [string]$INSPECT -eq '1'
+# Proxy logs to the host: --proxy-logs / --no-proxy-logs override $PROXY_LOGS = 1 in
 # run.local.ps1 (see run.sh's header comment for the mechanism). The per-session
 # directory name carries a timestamp and the harness so sessions are greppable/
 # sortable afterwards; a second session started in the same second gets the PID
 # appended. The directory is only created on the real (non-help) path below.
-$squidLogs = $false
-$squidLogDir = ''
-$squidLogsDesc = ''
-if ($cliSquidLogs -eq 'off') {
-  $squidLogsDesc = 'off (--no-squid-logs passed)'
-} elseif ($cliSquidLogs -eq 'on' -or [string]$SQUID_LOGS -eq '1') {
-  $squidLogs = $true
-  $squidLogBase = ''
-  if ($cliSquidLogDir) { $squidLogBase = $cliSquidLogDir }
-  elseif ($SQUID_LOG_DIR) { $squidLogBase = [string]$SQUID_LOG_DIR }
+$proxyLogs = $false
+$proxyLogDir = ''
+$proxyLogsDesc = ''
+if ($cliProxyLogs -eq 'off') {
+  $proxyLogsDesc = 'off (--no-proxy-logs passed)'
+} elseif ($cliProxyLogs -eq 'on' -or [string]$PROXY_LOGS -eq '1') {
+  $proxyLogs = $true
+}
+if ($proxyLogs) {
+  $proxyLogBase = ''
+  if ($cliProxyLogDir) { $proxyLogBase = $cliProxyLogDir }
+  elseif ($PROXY_LOG_DIR) { $proxyLogBase = [string]$PROXY_LOG_DIR }
   # %LOCALAPPDATA% is the Windows counterpart of XDG's ~/.local/state.
-  if ($squidLogBase) { $squidLogBase = Resolve-HostPath $squidLogBase }
-  else { $squidLogBase = Join-Path $env:LOCALAPPDATA 'agentcontainer\logs' }
-  $squidLogDir = Join-Path $squidLogBase ((Get-Date -Format 'yyyy-MM-dd-HHmmss') + '-' + $harnessName)
-  if (Test-Path -LiteralPath $squidLogDir) { $squidLogDir = "$squidLogDir-$PID" }
+  if ($proxyLogBase) { $proxyLogBase = Resolve-HostPath $proxyLogBase }
+  else { $proxyLogBase = Join-Path $env:LOCALAPPDATA 'agentcontainer\logs' }
+  $proxyLogDir = Join-Path $proxyLogBase ((Get-Date -Format 'yyyy-MM-dd-HHmmss') + '-' + $harnessName)
+  if (Test-Path -LiteralPath $proxyLogDir) { $proxyLogDir = "$proxyLogDir-$PID" }
 }
 
 # See harnesses\README.md for the keys. Space-separated lists; last line wins.
@@ -266,7 +306,7 @@ if ($cliNoBashSandbox -or [string]$BASH_SANDBOX -eq '0') {
 
 # See run.sh: --env-file, else ENV_FILE, else the default file if it exists; --no-env-file
 # or ENV_FILE=off for none. Docker parses the file; the names are collected for
-# entrypoint.sh (sudo) and checked against the variables the sandbox relies on.
+# entrypoint.sh (kept through the drop to dev) and checked against the variables the sandbox relies on.
 if ($noEnvFile -and $cliEnvFile) { Fail '--env-file and --no-env-file are mutually exclusive' }
 $defaultEnvFile = Join-Path $env:USERPROFILE '.config\agentcontainer.env'
 $envFile = ''
@@ -288,7 +328,7 @@ if ($envFile) {
     if ($line -match '^\s*(#|$)') { continue }
     $key = $line.Split('=')[0]
     if ($key -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Fail "${envFile}: invalid variable name '$key'" }
-    if ($key -cmatch '^(HOME|PATH|USER|SHELL|SUDO_.*|HOST_.*|AGENTCONTAINER_.*|SQUID_.*|ALLOW_CONTAINER|WITH_DOCKER)$' -or
+    if ($key -cmatch '^(HOME|PATH|USER|SHELL|SUDO_.*|HOST_.*|AGENTCONTAINER_.*|LD_.*|GCONV_PATH|OPENSSL_.*|INSPECT|PROXY_LOGS|PROXY_LOG_DIR|ALLOW_CONTAINER|WITH_DOCKER)$' -or
         $key -match '^(HTTP|HTTPS|NO|ALL)_PROXY$') {
       Fail "${envFile}: '$key' is reserved by the sandbox and can't be set from an env file"
     }
@@ -322,7 +362,7 @@ if ($showHelp) {
   elseif ($allowList) { $listDesc = "$allowList (--allow-list passed, overrides image default)" }
   else { $listDesc = 'image default (allowed-domains.txt baked in at build; pass --allow-list to override)' }
   if ($allowContainer) { $sockDesc = "Docker Desktop's /var/run/docker.sock (--allow-container passed - root-equivalent access to its VM and every container in it)" }
-  elseif ($withDocker) { $sockDesc = 'nested dockerd in the container (--with-docker passed; --privileged, since sysbox is unavailable on Docker Desktop)' }
+  elseif ($withDocker) { $sockDesc = "nested dockerd in the container ($withDockerSrc; --privileged, since sysbox is unavailable on Docker Desktop)" }
   else { $sockDesc = 'none (default; pass --with-docker for a nested dockerd, --allow-container for the host daemon)' }
   if ($allowConfig) { $cfgDesc = 'WRITABLE (--allow-config passed - edits persist on the host)' }
   else { $cfgDesc = "read-only (default; pass --allow-config to let the harness change it)" }
@@ -339,9 +379,9 @@ if ($showHelp) {
   @"
 Usage: run.ps1 [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
                [--allow-container | --with-docker] [--allow-config]
-               [--mount <path|host:container[:ro]>]...
+               [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
                [--no-bash-sandbox] [--env-file <path> | --no-env-file]
-               [--squid-logs[=<path>] | --no-squid-logs]
+                [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect]
                [-h|--help] [harness-args... | command...]
 
 Windows/Docker Desktop version of run.sh - same flags, see run.sh --help or README.md
@@ -365,7 +405,8 @@ Effective config on this machine:
   dev UID:GID:    $remapDesc
   Bash sandbox:   $bashSandboxDesc
   Env file:       $envDesc
-  Squid logs:     $(if ($squidLogs) { "$squidLogDir (mirrored to the host)" } elseif ($squidLogsDesc) { $squidLogsDesc } else { 'container-only (/tmp, discarded on exit; --squid-logs or $SQUID_LOGS = 1 to save them)' })
+  Proxy logs:     $(if ($proxyLogs) { "$proxyLogDir (mirrored to the host)" } elseif ($proxyLogsDesc) { $proxyLogsDesc } else { 'container-only (/tmp, discarded on exit; --proxy-logs or $PROXY_LOGS = 1 to save them)' })
+  TLS inspect:    $(if ($inspect) { 'ON (--inspect: HTTPS decrypted, bodies logged - expect breakage)' } else { 'off (HTTPS tunneled undecrypted; --inspect to intercept)' })
   Mounts:
     $projectDir -> $projectTarget
 "@ | Write-Host
@@ -394,6 +435,13 @@ Effective config on this machine:
     Write-Host '    (no config\run.local.ps1 extra mounts)'
   }
   foreach ($m in $cliMounts) { Write-Host "    $m (from --mount)" }
+  $allCaCerts = @($CA_CERTS) + $cliCaCerts
+  if (@($allCaCerts).Count -gt 0) {
+    Write-Host "  Extra root CAs:  $(@($allCaCerts).Count) to import (run.local.ps1 CA_CERTS + --ca-cert):"
+    foreach ($c in $allCaCerts) { Write-Host "    $c" }
+  } else {
+    Write-Host '  Extra root CAs:  none (pass --ca-cert or set CA_CERTS in run.local.ps1 to trust a private root)'
+  }
   exit 0
 }
 
@@ -434,7 +482,8 @@ foreach ($entry in $harnessStaged) {
 }
 
 $dockerArgs = New-Object System.Collections.Generic.List[string]
-$dockerArgs.AddRange([string[]]@('--rm', '-it', '-w', $projectTarget, '-e', "HOST_HOME=$homeTarget"))
+# --init: docker-init is PID 1, not the harness (see run.sh).
+$dockerArgs.AddRange([string[]]@('--rm', '-it', '--init', '-w', $projectTarget, '-e', "HOST_HOME=$homeTarget"))
 Add-Bind $projectDir $projectTarget
 foreach ($entry in $harnessState) { Add-Bind (Get-HostHomePath $entry) "$homeTarget/$entry" }
 # See run.sh: harness.conf `tmpfs` paths are container-local tmpfs mounts covering a
@@ -474,6 +523,13 @@ if ($allowContainer) {
   $dockerArgs.AddRange([string[]]@('--privileged', '-e', 'WITH_DOCKER=1'))
 }
 
+# See run.sh: the Bash sandbox (bubblewrap) needs namespace/mount syscalls that Docker's
+# default seccomp profile reserves for CAP_SYS_ADMIN, and a fresh /proc that Docker's
+# masked /proc paths prevent. --privileged (--with-docker) allows both already.
+if ($bashSandbox -and -not $withDocker) {
+  $dockerArgs.AddRange([string[]]@('--security-opt', ('seccomp=' + (Join-Path $PSScriptRoot 'lib\seccomp-userns.json')), '--security-opt', 'systempaths=unconfined'))
+}
+
 if ($hostNetwork) {
   Write-Warning '--host-network shares the Docker Desktop VM network namespace: the container reaches every service on that VM''s 127.0.0.1, and the nftables egress firewall is NOT installed (it would alter the VM''s ruleset). NET_ADMIN is not added either.'
   $dockerArgs.AddRange([string[]]@('--network', 'host', '-e', 'AGENTCONTAINER_HOST_NETWORK=1'))
@@ -483,23 +539,24 @@ if ($hostNetwork) {
 }
 
 if ($allowList) {
-  Add-Bind $allowList '/etc/squid/allowed-domains.override.txt' -ReadOnly
+  Add-Bind $allowList '/etc/agentcontainer/allowed-hosts.override.txt' -ReadOnly
 }
-if ($allowInternet) { $dockerArgs.AddRange([string[]]@('-e', 'SQUID_ALLOW_INTERNET=1')) }
+if ($allowInternet) { $dockerArgs.AddRange([string[]]@('-e', 'AGENTCONTAINER_ALLOW_INTERNET=1')) }
+if ($inspect) { $dockerArgs.AddRange([string[]]@('-e', 'INSPECT=1')) }
 
-# entrypoint.sh mirrors squid's /tmp logs into this read-write per-session mount (see
+# entrypoint.sh mirrors the proxy's /tmp logs into this read-write per-session mount (see
 # run.sh's header comment). Created here, not at resolution time, so --help doesn't
 # leave an empty directory behind.
-if ($squidLogs) {
+if ($proxyLogs) {
   try {
-    New-Item -ItemType Directory -Force -Path $squidLogDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $proxyLogDir | Out-Null
   } catch {
-    Fail "can't create the squid log dir $squidLogDir - if a parent of it is root-owned (an older docker run creating a missing mount source as root), repair it from a WSL/Linux shell: sudo chown -R `"`$USER `" <that parent>"
+    Fail "can't create the proxy log dir $proxyLogDir - if a parent of it is root-owned (an older docker run creating a missing mount source as root), repair it from a WSL/Linux shell: sudo chown -R `"`$USER `" <that parent>"
   }
-  Add-Bind $squidLogDir '/var/log/agentcontainer'
+  Add-Bind $proxyLogDir '/var/log/agentcontainer'
   # Also mount the base itself rw at the same path, so a run.sh started from *inside*
   # a sandbox can create its own session dir there (see run.sh).
-  Add-Bind $squidLogBase (ConvertTo-ContainerPath $squidLogBase)
+  Add-Bind $proxyLogBase (ConvertTo-ContainerPath $proxyLogBase)
 }
 
 # Docker Desktop exposes its daemon socket at /var/run/docker.sock inside its VM, so the
@@ -514,6 +571,20 @@ if ($envFile) {
 
 foreach ($m in @($EXTRA_MOUNTS)) { Add-MountSpec ([string]$m) 'config\run.local.ps1' }
 foreach ($m in $cliMounts) { Add-MountSpec $m '--mount' }
+
+# --ca-cert / CA_CERTS: bind each CA file read-only under /etc/agentcontainer/ca-certs/;
+# entrypoint.sh imports them into the container's trust store at start (see run.sh).
+# Must be a file: Add-Bind's existence check alone would also accept a directory.
+# Indexed target names, so two files with the same basename don't collide (see run.sh).
+$caIndex = 0
+foreach ($c in (@($CA_CERTS) + $cliCaCerts)) {
+  $caHostPath = Resolve-HostPath ([string]$c)
+  if (-not (Test-Path -LiteralPath $caHostPath -PathType Leaf)) {
+    Fail "--ca-cert file not found: $caHostPath"
+  }
+  $caIndex++
+  Add-Bind $caHostPath "/etc/agentcontainer/ca-certs/$caIndex-$(Split-Path -Leaf $caHostPath)" -ReadOnly
+}
 
 $dockerArgs.Add($image)
 $dockerArgs.AddRange($forward)

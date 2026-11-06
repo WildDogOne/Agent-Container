@@ -10,7 +10,7 @@ reads everything harness-specific from these three files:
 
 | File | Used by | Purpose |
 |---|---|---|
-| `install.sh` | `image/Dockerfile` | Installs the tool. Runs as root at build time, after Node, Python 3.14, uv and bun are on `PATH`. Install binaries to `/usr/local/bin`, not a home directory (`sudo -u dev` doesn't keep `PATH`). |
+| `install.sh` | `image/Dockerfile` | Installs the tool. Runs as root at build time, after Node, Python 3.14, uv and bun are on `PATH`. Install binaries to `/usr/local/bin`, not a home directory (the switch to `dev` resets `PATH`). |
 | `allowed-domains.txt` | `image/Dockerfile` | Domains the tool needs at runtime, added to the shared allowlist in `image/allowed-domains.txt`. |
 | `harness.conf` | `run.sh`, `run.ps1`, `image/entrypoint.sh` | How to start the tool and which of your host config to mount in - see below. |
 

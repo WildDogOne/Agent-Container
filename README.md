@@ -12,8 +12,8 @@ the container is gone.
   and any extra mounts you ask for.
 - **Your config stays safe:** hooks, plugins, MCP servers and settings are mounted
   read-only, so a session can't plant something that runs on your host later.
-- **Egress allowlist:** outbound HTTP(S) goes through a squid proxy that only lets
-  through package registries, GitHub, Docker Hub and the agent's own API.
+- **Egress allowlist:** outbound HTTP(S) goes through a mitmproxy forward proxy that only
+  lets through package registries, GitHub, Docker Hub and the agent's own API.
 - **Docker inside:** each session has its own nested Docker daemon, so `docker` and
   `docker compose` work without touching the host's.
 - **Pluggable harnesses:** Claude Code, [Hermes Agent](#hermes-agent) and
@@ -155,6 +155,7 @@ harness. They can go anywhere in the argument list:
 |------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
 | `--harness NAME`                         | Run `harnesses/NAME` (image `agentcontainer:NAME`) instead of the default (`$HARNESS`, else `claude`).                                 |
 | `--mount PATH` / `--mount HOST:CTR[:ro]` | Extra bind mount. A bare path mounts read-write at the same path on both sides. Repeatable.                                         |
+| `--ca-cert FILE`                         | Import a root CA file into the container's trust store for this session (repeatable; `CA_CERTS` in `run.local.sh` = default). So an internal host signed by a private root CA is trusted - by the in-container clients, and under `--inspect` by mitmproxy's upstream check. Only the container's store changes. |
 | `--allow-list FILE`                      | Replace the whole egress allowlist with `FILE` (same format as `allowed-domains.txt`).                                              |
 | `--allow-internet`                       | Full internet for this session: drop the domain and port allowlists AND the nftables egress firewall (any host, any port; proxied traffic still logged). Can't be combined with `--allow-list`. |
 | `--host-network`                         | Share the host's network namespace instead of the bridge network. For VPNs that block the bridge - grants access to host loopback services and skips the nftables egress firewall.      |
@@ -165,8 +166,9 @@ harness. They can go anywhere in the argument list:
 | `--no-bash-sandbox`                      | Don't start the harness's `sandboxed_command` even if it has one. It's the default for harnesses that define one; for Claude Code: its own Bash sandbox on top of the container, see [below](#bash-sandbox). |
 | `--env-file FILE`                        | Pass the variables in `FILE` (docker env file) into the session, e.g. MCP tokens. See [below](#secrets-for-mcp-servers).            |
 | `--no-env-file`                          | Pass no env file, not even the default `~/.config/agentcontainer.env`.                                                              |
-| `--squid-logs[=PATH]`                    | Save this session's squid logs (access, cache, stderr) to the host, in `~/.local/state/agentcontainer/logs/<timestamp>-<harness>/` (`PATH`, or `SQUID_LOG_DIR` in `run.local.sh`, changes the base dir). See [Network egress](#network-egress). |
-| `--no-squid-logs`                        | Don't save the squid logs this session, even with `SQUID_LOGS=1` set.                                                                |
+| `--proxy-logs[=PATH]`                    | Save this session's proxy logs (mitmdump log + JSONL flow log) to the host, in `~/.local/state/agentcontainer/logs/<timestamp>-<harness>/` (`PATH`, or `PROXY_LOG_DIR` in `run.local.sh`, changes the base dir). See [Network egress](#network-egress). |
+| `--no-proxy-logs`                        | Don't save the proxy logs this session, even with `PROXY_LOGS=1` set.                                                               |
+| `--inspect`                              | TLS interception (mitmproxy decrypts HTTPS with a throwaway CA trusted only in-container): logs full request/response detail incl. bodies, with known secret shapes redacted. Breaks TLS pinning - off by default (`INSPECT=1`). |
 
 ```sh
 run.sh --mount ~/data --mount ~/models:/models:ro --continue
@@ -182,15 +184,19 @@ Per-machine settings live in `config/`. Each file there is gitignored and has a 
 |---|---|---|
 | `config/allowed-domains.txt` | `build.sh` | Extra domains to allow, on top of the defaults. See [Network egress](#network-egress). |
 | `config/extra-setup.sh` | `build.sh` | Extra packages or tools baked into the image. See [Customizing the image](#customizing-the-image). |
-| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`), nested Docker by default (`WITH_DOCKER=1`), Bash sandbox off (`BASH_SANDBOX=0`), env file (`ENV_FILE=`), squid logs to the host (`SQUID_LOGS=1`, `SQUID_LOG_DIR=`). |
+| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`), nested Docker by default (`WITH_DOCKER=1`), Bash sandbox off (`BASH_SANDBOX=0`), env file (`ENV_FILE=`), proxy logs to the host (`PROXY_LOGS=1`, `PROXY_LOG_DIR=`). |
 | `config/run.local.ps1` | `run.ps1` | The same for Windows. |
 
 **Rebuild with `./build.sh` after changing anything in `image/`, `harnesses/`,
 `config/allowed-domains.txt` or `config/extra-setup.sh`.** All of them are baked into
 the image, and a stale image keeps running the old version without any warning.
-`build.sh` always builds with `--no-cache` and prunes the dangling images it leaves
-behind. `./build.sh claude` builds just one harness; with no arguments it builds all
-of them.
+`build.sh` builds with `--no-cache` by default, so every build picks up current packages
+and the latest harness release, and prunes the dangling images it leaves behind.
+`./build.sh claude` builds just one harness; with no arguments it builds all of them.
+`./build.sh --cached` reuses Docker's layer cache instead: much faster when you only
+changed this repo's own files (the entrypoint, the proxy addon and the allowlists are
+copied in last), but nothing already cached gets updated - run a plain build now and
+then.
 
 ## How it works
 
@@ -198,7 +204,7 @@ of them.
 flowchart LR
     subgraph repo["This repo (build inputs)"]
         buildsh["build.sh"]
-        image_dir["image/<br/>Dockerfile, entrypoint.sh,<br/>squid.conf, allowed-domains.txt"]
+        image_dir["image/<br/>Dockerfile, entrypoint.sh,<br/>inspect-proxy.py, allowed-domains.txt"]
         harness_dir["harnesses/NAME/<br/>install.sh, harness.conf,<br/>allowed-domains.txt"]
         config_dir["config/<br/>allowed-domains.txt, extra-setup.sh"]
         runsh["run.sh"]
@@ -217,7 +223,7 @@ flowchart LR
 
     subgraph ctr["Container (--rm, one per session)"]
         pid1["entrypoint.sh (PID 1, root)"]
-        squid["squid<br/>127.0.0.1:3128"]
+        proxy["mitmproxy<br/>127.0.0.1:3128"]
         innerdockerd["nested dockerd<br/>(--with-docker only; --allow-container<br/>mounts the host socket instead)"]
         devcmd["harness / override cmd<br/>as user dev, HOME=HOST_HOME"]
     end
@@ -237,24 +243,24 @@ flowchart LR
     pwd -. " bind mount rw, same path " .-> devcmd
     harnesscfg -. " bind mount, config ro " .-> devcmd
     extramounts -. " bind mount " .-> devcmd
-    allowoverride -. " ro mount, cp over allowlist " .-> squid
+    allowoverride -. " ro mount, cp over allowlist " .-> proxy
     hostsock -. " bind mount " .-> devcmd
-    pid1 -- " 1: start " --> squid
+    pid1 -- " 1: start " --> proxy
     pid1 -- " 2: start (--with-docker only) " --> innerdockerd
-    pid1 -- " 3: exec sudo -u dev " --> devcmd
-    devcmd -- " HTTP(S)_PROXY " --> squid
+    pid1 -- " 3: exec setpriv (drop to dev) " --> devcmd
+    devcmd -- " HTTP(S)_PROXY " --> proxy
     devcmd -- " docker CLI " --> innerdockerd
-    squid --> internet
+    proxy --> internet
 ```
 
 - **Build time:** `build.sh` builds one image per harness from `image/Dockerfile`. The
-  shared part copies in `entrypoint.sh` and `squid.conf` and runs
+  shared part copies in `entrypoint.sh` and `inspect-proxy.py` and runs
   `config/extra-setup.sh`. The harness part runs `harnesses/NAME/install.sh`, bakes in
   its `harness.conf`, and assembles the allowlist.
 - **Run time:** `run.sh` reads `harnesses/NAME/harness.conf` and starts a fresh `--rm`
   container with only the mounts listed below.
-- **Inside the container:** `entrypoint.sh` runs as root. It starts squid (the egress
-  proxy) and, only when `--with-docker` was passed, the nested `dockerd`; then switches
+- **Inside the container:** `entrypoint.sh` runs as root. It starts mitmdump (the egress
+  proxy, as its own unprivileged `agentproxy` user with a clean environment) and, only when `--with-docker` was passed, the nested `dockerd`; then switches
   to the unprivileged `dev` user (no sudo) to run the harness's default command or the
   command you gave.
 
@@ -265,7 +271,7 @@ flowchart LR
 | `build.sh`, `run.sh` | What you run: build the images, start a session. |
 | `build.ps1`, `run.ps1`, `setup.ps1` | The same for Windows, see [docs/windows.md](docs/windows.md). |
 | [`harnesses/`](harnesses/) | One folder per supported tool: how to install it, what to mount, which domains it needs. See [harnesses/README.md](harnesses/README.md). |
-| `image/` | The shared sandbox: `Dockerfile`, `entrypoint.sh`, the squid config and the default allowlist. Nothing harness-specific. |
+| `image/` | The shared sandbox: `Dockerfile`, `entrypoint.sh`, the mitmproxy egress addon and the default allowlist. Nothing harness-specific. |
 | `config/` | Your per-machine settings, see [Configuration](#configuration). |
 | `lib/` | Helpers for the PowerShell scripts. |
 | `docs/` | Per-harness quickstarts, Windows and sysbox setup. |
@@ -322,17 +328,17 @@ For mounts you need in every session on this machine, copy
 
 ## Network egress
 
-All outbound HTTP (S) goes through a squid proxy inside the container, listening only on
-`127.0.0.1:3128`. The proxy only lets through the domains in the image's allowlist, which
-`build.sh` assembles from three files:
+All outbound HTTP (S) goes through a mitmproxy forward proxy inside the container,
+listening only on `127.0.0.1:3128`. The proxy only lets through the domains in the image's
+allowlist, which `build.sh` assembles from three files:
 
 - `image/allowed-domains.txt`: shared defaults (package registries, GitHub, Docker Hub)
 - `harnesses/NAME/allowed-domains.txt`: what the harness itself needs
 - `config/allowed-domains.txt`: your own additions (gitignored)
 
-One domain per line; a leading `.` also matches subdomains. Bare IPv4 addresses and
-CIDRs work too (`10.10.10.81`) - a tool pointed straight at an IP can't be matched by
-domain. Only ports 80 and 443 are
+One domain per line; a leading `.` also matches subdomains. Bare IPv4/IPv6 addresses and
+CIDRs work too (`10.10.10.81`, `fd00::/64`) - a tool pointed straight at an IP can't be matched by
+domain. An IPv6 entry with a port needs brackets: `[fd00::10]:8080`. Only ports 80 and 443 are
 allowed, unless an entry names another one: `llm.example.lan:8080` (for example a
 self-hosted model server) also opens port 8080, for every allowed domain. Add to your
 own file (and rebuild) when a workflow needs a new host. For a single session, use `--allow-list FILE`
@@ -350,8 +356,8 @@ egress firewall: everything except loopback, the Docker bridges and replies to a
 flows is rejected for the `dev` user, so a tool that ignores proxy settings (`curl
 --noproxy`, raw sockets, resolve-then-connect) or tries outbound port 22 (no
 git-over-SSH: pushing stays a host-side operation) simply can't reach the network.
-Only root (squid's own resolution, a `--with-docker` nested daemon) originates traffic
-directly. `run.sh` adds `--cap-add NET_ADMIN` (scoped to the container's own network
+Only the proxy's `agentproxy` user (its upstream connections) and root (a `--with-docker`
+nested daemon) originate traffic directly. `run.sh` adds `--cap-add NET_ADMIN` (scoped to the container's own network
 namespace) so the rules can be installed. The firewall is skipped by `--allow-internet`
 (unrestricted egress is its point) and by `--host-network` (the rules would land in the
 host's ruleset). Traffic from *nested* containers (with `--with-docker`) goes through
@@ -359,15 +365,20 @@ the nested daemon, not this allowlist.
 For Claude Code, the [Bash sandbox](#bash-sandbox) (on by default) adds the harness's
 own network/ filesystem restrictions on top.
 
-Blocked requests are logged in `/tmp/squid-access.log` inside the container. Read it with
-`tail /tmp/squid-access.log` when something fails to download. Those logs die with the
-container; `run.sh --squid-logs` (or `SQUID_LOGS=1` in `config/run.local.sh`) mirrors
-access, cache and stderr logs into a per-session host directory
+Every proxied flow - allowed and blocked - is logged inside the container: mitmdump's own
+log at `/tmp/mitmdump.log` and the addon's JSONL flow log at `/tmp/agentcontainer/flows.jsonl`. Read the
+mitmdump log with `tail /tmp/mitmdump.log` when something fails to download. Those logs die with the
+container; `run.sh --proxy-logs` (or `PROXY_LOGS=1` in `config/run.local.sh`) mirrors
+both into a per-session host directory
 (`~/.local/state/agentcontainer/logs/<timestamp>-<harness>/` on Linux,
 `%LOCALAPPDATA%\agentcontainer\logs\...` on Windows) for later analysis. They cover
-proxied traffic only - not nested containers' egress under `--with-docker`. Squid
-buffers its access log, so entries can lag a few seconds and the last few may be lost
-if the session exits right after a request.
+proxied traffic only - not nested containers' egress under `--with-docker`. By default
+HTTPS is only tunneled, so the flow log records the target host per CONNECT; with
+`--inspect` it records full request/response detail including bodies. Secrets are
+redacted before anything is written (`image/redact_secrets.py`): JSON and form bodies,
+query strings and headers by field name, plus ~30 token shapes ported from the
+gitleaks/betterleaks rule sets in any remaining text - best effort, so treat `--inspect`
+logs as sensitive anyway.
 
 `--host-network` swaps isolation for connectivity, for example behind a corporate VPN
 that only routes the host's own traffic. Only use it when the bridge network can't reach
@@ -385,8 +396,8 @@ Claude Code has one so far: `claude-sandboxed`, which turns on Claude Code's own
 it runs. Every Bash command then runs in bubblewrap, inside the container:
 
 - **Network:** each command gets its own network namespace. The only way out is Claude
-  Code's proxy, which allows the same domains as squid (generated from this session's
-  list, so `--allow-list` applies too) and then tunnels through squid itself. Anything
+  Code's proxy, which allows the same domains as the egress allowlist (generated from this session's
+  list, so `--allow-list` applies too) and then tunnels through the proxy itself. Anything
   else waits for your OK or is refused, depending on the permission mode. A tool that
   ignores proxy settings has no network at all instead of a direct route.
 - **Secrets:** `~/.claude/.credentials.json` (the login token) and the backups of
@@ -468,8 +479,11 @@ server's `url` and `headers` instead of expanding them.
 The variables reach Claude Code and the MCP servers it starts. With the Bash sandbox (the
 default for Claude Code), shell commands don't see them. Names the sandbox itself relies
 on (`HTTP_PROXY` and
-friends, `HOME`, `HOST_*`, `SQUID_*`, `AGENTCONTAINER_*`, ...) are refused, so an env file
-can't quietly switch off the allowlist.
+friends, `HOME`, `HOST_*`, `INSPECT`, `PROXY_LOGS`, `AGENTCONTAINER_*`, ...) are refused, so an env file
+can't quietly switch off the allowlist. So are the dynamic loader's `LD_*` variables,
+`GCONV_PATH` and `OPENSSL_*`: the container's startup script runs as root with the env
+file's variables, and e.g. `LD_LIBRARY_PATH` or `OPENSSL_CONF` pointing into the
+(agent-writable) project would make root load a library the agent planted there.
 
 ## Docker inside the sandbox
 
@@ -508,8 +522,8 @@ npm install -g some-mcp-server-package
 UV_TOOL_DIR=/usr/local/share/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install some-python-mcp-server
 ```
 
-Install binaries into `/usr/local/bin` rather than a home directory, because
-`sudo -u dev` doesn't keep `PATH`. For `uv tool`, also move its tool directory as above:
+Install binaries into `/usr/local/bin` rather than a home directory, because the switch
+to `dev` resets `PATH`. For `uv tool`, also move its tool directory as above:
 uv's default is under `/root`, which `dev` can't read. If the tool needs network access
 at runtime, add its domains to `config/allowed-domains.txt` too.
 
@@ -567,7 +581,7 @@ parents, and activates the first one it finds. Nothing creates the venv for you:
 
 ## Troubleshooting
 
-- **`sudo: remote-control: command not found`** (or similar): a harness flag was passed
+- **`env: 'remote-control': No such file or directory`** (or similar): a harness flag was passed
   without its leading dashes. `run.sh remote-control` is treated as a command to run
   instead of the harness. Use `run.sh --remote-control`.
 - **`~/.claude.json` is a directory:** an older version of `run.sh` ran before that
@@ -576,9 +590,9 @@ parents, and activates the first one it finds. Nothing creates the venv for you:
   the first-run steps in [Quick start](#quick-start).
 - **`image agentcontainer:NAME not found`:** run `./build.sh NAME`.
 - **A change to the image has no effect:** rebuild with `./build.sh`.
-- **A download or API call is blocked:** run `tail /tmp/squid-access.log` inside
+- **A download or API call is blocked:** run `tail /tmp/mitmdump.log` inside
   the container to see which domain was refused, then use `--allow-list` or add it to
-  `config/allowed-domains.txt`. Start with `--squid-logs` (or `SQUID_LOGS=1` in
+  `config/allowed-domains.txt`. Start with `--proxy-logs` (or `PROXY_LOGS=1` in
   `config/run.local.sh`) to keep the logs on the host after the session ends.
 - **`cache-miss` on `/reload-plugins`:** make sure you started through `run.sh`, which
   keeps `$HOME` in the container the same as on the host. A bare `docker run` doesn't.

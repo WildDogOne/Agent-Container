@@ -39,23 +39,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     openssh-client \
     bash \
-    sudo \
-    # squid: loopback-only egress allowlist proxy, see squid.conf.
-    squid \
-    # nftables: the egress firewall entrypoint.sh installs around squid, see entrypoint.sh.
+    # nftables: the egress firewall entrypoint.sh installs around the proxy, see entrypoint.sh.
     nftables \
     # unzip: required by the Bun installer below (bun ships as a .zip release).
     unzip \
     && rm -rf /var/lib/apt/lists/*
-
-# The allowlist itself (/etc/squid/allowed-domains.txt) is assembled per harness at the
-# bottom of this file.
-COPY image/squid.conf /etc/squid/squid.conf
-# CRLF -> LF on everything COPYed in from the build context (here and below): a Windows
-# checkout with core.autocrlf=true, or a gitignored file saved in Notepad, would
-# otherwise give squid "example.com\r" domains and the shell scripts a "/bin/sh\r"
-# interpreter. .gitattributes covers tracked files; this also covers the personal ones.
-RUN sed -i 's/\r$//' /etc/squid/squid.conf
 
 # Ubuntu 24.04's own python3 is 3.12; 3.14 comes from the deadsnakes PPA (needs
 # software-properties-common's add-apt-repository - there's no plain apt source line
@@ -80,33 +68,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends software-proper
 # land here via `docker exec` or the entrypoint's own login shell. Walks up from $PWD
 # rather than a fixed path, since this image doesn't know in advance which project
 # directory a given session will open (see run.sh's cwd mount).
-RUN mkdir -p /etc/zsh && cat <<'EOF' > /etc/zsh/zshenv.venv
-_venv_dir=$PWD
-while [ -n "$_venv_dir" ] && [ "$_venv_dir" != "/" ]; do
-  if [ -f "$_venv_dir/.venv/bin/activate" ]; then
-    . "$_venv_dir/.venv/bin/activate"
-    break
-  fi
-  _venv_dir=${_venv_dir%/*}
-done
-unset _venv_dir
-EOF
+# A real file rather than a RUN heredoc: the legacy builder (no buildx) doesn't
+# support heredocs and silently wrote an empty file.
+COPY image/zshenv.venv /etc/zsh/zshenv.venv
+RUN sed -i 's/\r$//' /etc/zsh/zshenv.venv
 RUN echo '[ -f /etc/zsh/zshenv.venv ] && . /etc/zsh/zshenv.venv' >> /etc/zsh/zshenv
 
-# Belt-and-suspenders alongside entrypoint.sh's explicit --preserve-env: covers any
-# other login/PAM-aware program that reads /etc/environment directly (sudo's own PAM
-# session module included, depending on /etc/pam.d/sudo config).
-RUN cat <<'EOF' >> /etc/environment
-HTTP_PROXY=http://127.0.0.1:3128
-HTTPS_PROXY=http://127.0.0.1:3128
-NO_PROXY=localhost,127.0.0.1
-http_proxy=http://127.0.0.1:3128
-https_proxy=http://127.0.0.1:3128
-no_proxy=localhost,127.0.0.1
-EOF
-
-COPY image/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+# Belt-and-suspenders alongside entrypoint.sh's explicit preserve_env list: covers any
+# login/PAM-aware program that reads /etc/environment directly.
+RUN printf '%s\n' \
+      HTTP_PROXY=http://127.0.0.1:3128 HTTPS_PROXY=http://127.0.0.1:3128 NO_PROXY=localhost,127.0.0.1 \
+      http_proxy=http://127.0.0.1:3128 https_proxy=http://127.0.0.1:3128 no_proxy=localhost,127.0.0.1 \
+      >> /etc/environment
 
 # Create a non-root "dev" user at UID/GID 1000. entrypoint.sh remaps it to the
 # invoking host user's UID/GID at startup (passed in by run.sh), so files created in
@@ -121,13 +94,14 @@ RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
     && groupadd -g $USER_GID $USERNAME \
     && useradd -m -u $USER_UID -g $USER_GID -s /bin/zsh $USERNAME \
     && usermod -aG docker $USERNAME
-# No sudoers entry for $USERNAME on purpose: the harness and everything it runs (shell
-# commands, MCP servers, build scripts) executes as this user, so a passwordless sudo
-# here would be a ready-made privilege-escalation path from any harness compromise to
-# root inside the container. entrypoint.sh's own `sudo -u dev` drops root->dev and runs
-# as PID 1's root before the drop, so it needs no sudoers rule. Anything that genuinely
-# needs root in the container (none of the supported workflows do) needs a redesign, not
-# a sudo grant.
+# No sudo for $USERNAME on purpose - the package isn't even installed: the harness and
+# everything it runs (shell commands, MCP servers, build scripts) executes as this user,
+# so a passwordless sudo would be a ready-made privilege-escalation path from any harness
+# compromise to root inside the container, and even without a sudoers entry a setuid-root
+# sudo binary is attack surface (CVE-2021-3156 needed none). entrypoint.sh drops
+# root->dev with setpriv, which needs no setuid helper. Anything that genuinely needs root
+# in the container (none of the supported workflows do) needs a redesign, not a sudo
+# grant.
 
 # uv/uvx: MCP servers registered with a harness (e.g. `uvx mcp-atlassian`) exec uvx
 # directly, so it has to be a real binary on PATH rather than something uvx's own
@@ -137,13 +111,30 @@ RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
 # needs to work for both.
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
+# mitmproxy (mitmdump): the loopback-only egress allowlist proxy entrypoint.sh starts.
+# Installed into a dedicated venv rather than system Python, because
+# Ubuntu 24.04 marks its Python externally-managed (PEP 668) and the deadsnakes 3.14
+# interpreter has no pip at all; uv creates the venv and installs prebuilt cp314 wheels
+# (mitmproxy-rs, aioquic, cryptography, ...) with no source build. Pinned to the 12.x
+# line the addon (image/inspect-proxy.py) is written against. /usr/local/bin symlink so
+# entrypoint.sh reaches it after the PATH reset of its drop to dev (same reasoning as
+# uv/bun above).
+RUN uv venv --python python3.14 /opt/mitmproxy \
+    && uv pip install --python /opt/mitmproxy/bin/python 'mitmproxy>=12.3,<13' \
+    && ln -s /opt/mitmproxy/bin/mitmdump /usr/local/bin/mitmdump \
+    && useradd --system --user-group --no-create-home --home-dir /nonexistent \
+         --shell /usr/sbin/nologin agentproxy
+# agentproxy: the unprivileged system user entrypoint.sh runs mitmdump as (setpriv + a
+# clean `env -i`), so the proxy - a Python process loading an addon - never runs as root
+# with the session's env-file variables. Its UID gets its own nftables accept rule.
+
 # Bun: runtime for MCP servers started via `bun run`, e.g. the official "telegram"
 # Claude Code plugin's (the plugin itself lives in the harness's bind-mounted config
 # dir, so only the `bun` binary needs to be in the image). Same /usr/local/bin
-# reasoning as uv above, and for the same reason it matters even more here: entrypoint.sh's `sudo -u dev` calls don't preserve PATH, so a bun install
-# living under a home directory (root's or dev's) would silently vanish once dropped
-# to dev - sudo resets PATH to its own fixed secure_path, which only covers the usual
-# /usr/local/bin, /usr/bin, etc.
+# reasoning as uv above, and for the same reason it matters even more here:
+# entrypoint.sh's drop to dev resets PATH to a fixed list (the usual /usr/local/bin,
+# /usr/bin, etc.), so a bun install living under a home directory (root's or dev's)
+# would silently vanish once dropped to dev.
 RUN curl -fsSL https://bun.sh/install | env BUN_INSTALL=/usr/local bash
 
 # Optional per-machine extra dependencies (custom MCP servers' own runtime
@@ -176,9 +167,25 @@ COPY image/allowed-domains.txt /tmp/domains/00-default.txt
 COPY harnesses/${HARNESS}/allowed-domains.txt /tmp/domains/10-harness.txt
 COPY config/allowed-domains.txt /tmp/domains/20-local.txt
 RUN cat /tmp/domains/*.txt | sed 's/\r$//; s/#.*//; s/[[:space:]]//g' | grep -v '^$' | sort -u \
-    > /etc/squid/allowed-domains.txt \
+    > /etc/agentcontainer/allowed-hosts.txt \
     && rm -rf /tmp/domains
 
-# Stays root: entrypoint.sh needs it to start dockerd/squid, then drops to dev itself
-# (via `sudo -u dev`) before running the actual command.
+# The sandbox's own scripts come last, after every slow install step (shared and
+# harness): build.sh --cached reuses all layers up to the first changed file, so an edit
+# to the entrypoint or the proxy addon then only reruns these few steps, not
+# Python/uv/mitmproxy/bun or the harness install.
+# The egress allowlist (/etc/agentcontainer/allowed-hosts.txt) assembled above is
+# enforced by the mitmproxy addon copied here (which also logs request/response flows
+# when a session runs with --inspect). CRLF -> LF on everything COPYed in from the build
+# context (here and above): a Windows checkout with
+# core.autocrlf=true, or a gitignored file saved in Notepad, would otherwise give the
+# allowlist "example.com\r" entries and the shell scripts a "/bin/sh\r" interpreter.
+# .gitattributes covers tracked files; the per-COPY seds also cover the personal ones.
+COPY image/inspect-proxy.py image/redact_secrets.py /usr/local/lib/agentcontainer/
+RUN sed -i 's/\r$//' /usr/local/lib/agentcontainer/inspect-proxy.py /usr/local/lib/agentcontainer/redact_secrets.py
+COPY image/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+
+# Stays root: entrypoint.sh needs it to start dockerd/mitmdump, then drops to dev itself
+# (via setpriv) before running the actual command.
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

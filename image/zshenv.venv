@@ -1,0 +1,11 @@
+# Installed as /etc/zsh/zshenv.venv and sourced from /etc/zsh/zshenv (see the
+# Dockerfile): activates the nearest .venv, walking up from $PWD.
+_venv_dir=$PWD
+while [ -n "$_venv_dir" ] && [ "$_venv_dir" != "/" ]; do
+  if [ -f "$_venv_dir/.venv/bin/activate" ]; then
+    . "$_venv_dir/.venv/bin/activate"
+    break
+  fi
+  _venv_dir=${_venv_dir%/*}
+done
+unset _venv_dir

@@ -114,7 +114,7 @@ flowchart LR
     subgraph ctr["Container (--rm, one per session)"]
         pid1["entrypoint.sh"]
         claude["claudecode"]
-        squid["Squid Proxy"]
+        proxy["mitmproxy"]
     end
 
     allow["Allowlist"]
@@ -124,7 +124,7 @@ flowchart LR
     runsh -- "docker run" --> pid1
     image -- "starts from" --> pid1 --> claude
     mounts -.-> claude
-    claude -- "HTTPS_PROXY" --> squid --> allow --> internet
+    claude -- "HTTPS_PROXY" --> proxy --> allow --> internet
 ```
 
 - **Read-write:** your project and `~/.claude`, which Claude Code needs for its login,
@@ -144,7 +144,7 @@ flowchart LR
 - **Copied in:** `~/.claude.json` is rewritten by Claude Code on every start, so it's
   mounted read-only elsewhere and copied into place. Trust prompts and other state in it
   reset every session.
-- **Egress:** only through squid, to the domains in `harnesses/claude/allowed-domains.txt`
+- **Egress:** only through the proxy, to the domains in `harnesses/claude/allowed-domains.txt`
   plus the shared defaults.
 - **Bash sandbox caveat, sysbox only:** under `--sysbox` the Bash sandbox falls back to
   nested mode (see the [README](../README.md#bash-sandbox)), where sandboxed shell

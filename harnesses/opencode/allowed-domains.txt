@@ -1,5 +1,5 @@
 # Egress opencode needs at runtime, on top of image/allowed-domains.txt.
-# Same format: one squid dstdomain entry per line, a leading "." also matches subdomains.
+# Same format: one entry per line, a leading "." also matches subdomains.
 # opencode talks to whichever model provider you configure: add yours to
 # config/allowed-domains.txt if it isn't listed here.
 

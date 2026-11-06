@@ -163,7 +163,7 @@ stay the same on both sides, as on Linux.
 ## Line endings
 
 A Windows checkout with `core.autocrlf=true` would normally convert files to CRLF,
-which breaks shell scripts and squid's domain list inside the Linux image. Three things
+which breaks shell scripts and the proxy's allowlist inside the Linux image. Three things
 prevent that:
 
 - `.gitattributes` keeps every tracked file LF, except `*.ps1`.

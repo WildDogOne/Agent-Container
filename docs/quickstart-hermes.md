@@ -123,7 +123,7 @@ flowchart LR
     subgraph ctr["Container (--rm, one per session)"]
         pid1["entrypoint.sh"]
         hermes["hermes"]
-        squid["Squid Proxy"]
+        proxy["mitmproxy"]
     end
 
     allow["Allowlist"]
@@ -133,7 +133,7 @@ flowchart LR
     runsh -- "docker run" --> pid1
     image -- "starts from" --> pid1 --> hermes
     mounts -.-> hermes
-    hermes -- "HTTPS_PROXY" --> squid --> allow --> internet
+    hermes -- "HTTPS_PROXY" --> proxy --> allow --> internet
 ```
 
 - **Read-write:** your project and `~/.hermes`, which holds the login, memories,
@@ -144,7 +144,7 @@ flowchart LR
 - **Baked in:** the Hermes code lives in `/opt/hermes`. Hermes refuses to run an install
   owned by another user, so `entrypoint.sh` re-chowns it when `dev` is remapped to your
   host UID (the `owned` key in `harness.conf`).
-- **Egress:** only through squid, to the domains in
+- **Egress:** only through the proxy, to the domains in
   `harnesses/hermes/allowed-domains.txt` plus the shared defaults.
 
 ## Common tweaks

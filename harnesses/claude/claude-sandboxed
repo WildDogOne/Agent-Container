@@ -4,7 +4,7 @@
 # entrypoint.sh runs for `run.sh --bash-sandbox`. Installed to /usr/local/bin by
 # install.sh. Arguments are passed through to claude.
 #
-# Why a second layer: squid only filters what honors the proxy env vars, so a Bash
+# Why a second layer: the container proxy only filters what honors the proxy env vars, so a Bash
 # command that ignores them (curl --noproxy, raw sockets) reaches the network directly,
 # and the login token in ~/.claude/.credentials.json is plain readable by any command.
 # Inside Claude Code's sandbox every Bash command gets its own network namespace with
@@ -13,7 +13,7 @@
 # the file tools.
 #
 # The settings are generated per session rather than baked in, so they follow this
-# session's squid allowlist (including a --allow-list override) and the variables
+# session's egress allowlist (including a --allow-list override) and the variables
 # passed in with run.sh --env-file. Passed via --settings, not ~/.claude/settings.json,
 # so the host's native claude is unaffected (same reason as --permission-mode auto in
 # harness.conf), and so allowUnsandboxedCommands: false can't be undone by a project's
@@ -63,14 +63,17 @@ elif AGENTCONTAINER_BWRAP_EXTRA_NS=1 probe --bind /proc /proc; then
   echo "claude-sandboxed: Bash sandbox on (nested mode for sysbox, see README)" >&2
 else
   echo "claude-sandboxed: bubblewrap doesn't work in this container, refusing to start without the Bash sandbox" >&2
-  echo "claude-sandboxed: run without --bash-sandbox, or check: bwrap --unshare-all --ro-bind / / true" >&2
+  echo "claude-sandboxed: start with run.sh --no-bash-sandbox, or check: bwrap --unshare-user --unshare-pid --ro-bind / / --proc /proc true" >&2
   exit 1
 fi
 
-# squid's list (see image/squid.conf) -> allowedDomains. A leading "." means the domain
-# and every subdomain in squid, so it becomes both "x.com" and "*.x.com". Ports are
-# dropped: the sandbox filters by host only, squid still checks the port.
-domains=$(sed 's/\r$//; s/#.*//; s/[[:space:]]//g; s/:[0-9]*$//' /etc/squid/allowed-domains.txt \
+# The allowlist (see image/inspect-proxy.py) -> allowedDomains. A leading "." means the
+# domain and every subdomain, so it becomes both "x.com" and "*.x.com". Ports are
+# dropped: the sandbox filters by host only, the proxy addon still checks the port.
+# Same entry forms as the addon's _split_port(): "[v6]:port" -> v6 (brackets off), a bare
+# IPv6 address/CIDR (several colons) stays whole, only a single-colon "host:port" loses
+# its port.
+domains=$(sed -E 's/\r$//; s/#.*//; s/[[:space:]]//g; s/^\[([^]]*)\](:[0-9]+)?$/\1/; /^[^:]+:[0-9]+$/s/:[0-9]+$//' /etc/agentcontainer/allowed-hosts.txt \
   | grep -v '^$' | sort -u \
   | jq -R -s 'split("\n") | map(select(length > 0)) | map(if startswith(".") then (.[1:], "*" + .) else . end) | unique')
 

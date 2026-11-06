@@ -11,7 +11,7 @@
 #
 # Runs as root, late in the build (after Node/Python/uv/bun are already set up, before
 # the harness itself is installed - see image/Dockerfile), so it's shared by every
-# harness's image. Normal internet access works here, since squid's egress allowlist
+# harness's image. Normal internet access works here, since the proxy's egress allowlist
 # only applies at runtime. If the tool itself needs network access at *runtime* (not
 # just to install), add its domain(s) to config/allowed-domains.txt too - this script
 # only covers the build.
@@ -38,4 +38,4 @@ set -eu
 
 # Anything else - curl-installed binaries, etc. - follows the same pattern as the
 # uv/bun installs in image/Dockerfile: install straight into /usr/local/bin rather than a
-# home directory, since entrypoint.sh's `sudo -u dev` doesn't preserve PATH.
+# home directory, since entrypoint.sh's drop to dev resets PATH.

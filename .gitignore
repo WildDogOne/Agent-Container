@@ -3,13 +3,13 @@
 
 # Claude Code
 .claude
-CLAUDE.md
 
 # Local review notes
 code_review.md
 
-# Python virtualenv (host-side tooling)
+# Python virtualenv (host-side tooling) and bytecode from local test runs
 .venv/
+__pycache__/
 
 # Personal, per-machine config - see the .example next to each.
 config/run.local.sh

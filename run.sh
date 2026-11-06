@@ -21,10 +21,10 @@
 # nftables egress firewall entrypoint.sh normally installs. Run `run.sh --help`
 # for a summary of flags and this machine's resolved config (mounts, network mode).
 #
-# `--allow-list <path>` (consumed here, not forwarded on) swaps the squid egress
-# allowlist for that one session: the given file is bind-mounted read-only and
-# entrypoint.sh overwrites the image's baked-in allowed-domains.txt with it before squid
-# starts. Only affects this disposable container - the image itself, and every other
+# `--allow-list <path>` (consumed here, not forwarded on) swaps the egress allowlist
+# for that one session: the given file is bind-mounted read-only and entrypoint.sh
+# overwrites the image's baked-in allowed-hosts.txt with it before the proxy starts.
+# Only affects this disposable container - the image itself, and every other
 # session, still use the default list. See README.md.
 #
 # `--mount <path>` or `--mount <host:container[:ro]>` (consumed here, not forwarded on;
@@ -35,25 +35,43 @@
 # path run.local.sh doesn't already cover; for anything needed on every session on this
 # machine, put it in run.local.sh instead.
 #
-# `--allow-internet` (consumed here, not forwarded on) drops squid's domain and port
-# allowlists for this one session: entrypoint.sh patches the running config so `http_access
-# allow allowed_dst` becomes `http_access allow all` and removes the Safe_ports/SSL_ports
-# checks (any host, bare IPs included, on any port).
+# `--ca-cert <path>` (consumed here, not forwarded on; repeatable) bind-mounts an extra
+# root CA certificate file read-only into this session and entrypoint.sh imports it into
+# the container's trust store at start, so an internal host signed by a private root CA
+# (e.g. a corporate CA) is trusted. Who checks the chain depends on the mode: by default
+# HTTPS is only tunneled, so each in-container client verifies the origin itself (with
+# the system store, NODE_EXTRA_CA_CERTS, SSL_CERT_FILE, ...); under --inspect mitmproxy
+# terminates TLS and verifies the origin on the way upstream, against the same store. Nothing is baked into the image and only
+# this container's store changes - the host's trust store is never touched. run.local.sh's
+# CA_CERTS array lists personal defaults; --ca-cert adds to them per session.
+#
+# `--allow-internet` (consumed here, not forwarded on) drops the proxy's domain and port
+# allowlists for this one session: the mitmproxy addon skips its host/port checks, so any
+# host (bare IPs included) on any port is reachable.
 # Traffic is still proxied and logged, just no longer filtered. Only affects this
 # disposable container - the image, allowed-domains.txt, and every other session are
 # untouched. Mutually exclusive with --allow-list (one drops the list, the other swaps
 # it - combining them is almost certainly not what you meant).
 #
-# `--squid-logs` / `--no-squid-logs` (consumed here, not forwarded on) save this
-# session's squid logs (access, cache, stderr) to the host instead of letting them die
-# with the container: a per-session directory under
+# `--proxy-logs` / `--no-proxy-logs` (consumed here, not forwarded on) save this
+# session's proxy logs (mitmdump's own log + the addon's JSONL flow log) to the host
+# instead of letting them die with the container: a per-session directory under
 # ~/.local/state/agentcontainer/logs/<timestamp>-<harness>/ (override the base with
-# --squid-logs=<path> or SQUID_LOG_DIR in run.local.sh) is bind-mounted at
+# --proxy-logs=<path> or PROXY_LOG_DIR in run.local.sh) is bind-mounted at
 # /var/log/agentcontainer and entrypoint.sh mirrors the logs into it as dev, so the
-# files are owned by the host user. squid itself keeps writing to /tmp: it opens its log
-# files as root before dropping privileges, which would land root-owned files on the
-# host. SQUID_LOGS=1 in run.local.sh makes it the default; --no-squid-logs overrides
-# that for one session.
+# files are owned by the host user. mitmdump and the addon keep writing to /tmp: their
+# logs are owned by root and agentproxy there, which would land foreign-owned files on
+# the host.
+# PROXY_LOGS=1 in run.local.sh makes it the default; --no-proxy-logs overrides that for
+# one session.
+#
+# `--inspect` (consumed here, not forwarded on) turns on TLS interception for this
+# session: mitmproxy decrypts HTTPS with a throwaway CA generated inside the container and
+# trusted only inside the container, and the flow log then records full request/response
+# detail including message bodies (known secret shapes are redacted in the logged copy).
+# By default HTTPS is tunneled undecrypted, so this is opt-in deliberately: interception
+# adds a failure mode to every HTTPS call and breaks TLS-pinning services. INSPECT=1 in
+# run.local.sh makes it the default.
 #
 # `--allow-container` (consumed here, not forwarded on) bind-mounts the HOST's own Docker
 # socket (/var/run/docker.sock) into the container, instead of the nested dockerd
@@ -100,7 +118,7 @@
 # whether the harness's `sandboxed_command` (if it has one) is started instead of its
 # `command` - ON by default. For Claude Code, `sandboxed_command` is its own Bash sandbox
 # (bubblewrap) on top of this container: real network isolation for shell commands
-# instead of squid's proxy-env-only filtering, and no read access to the login token.
+# instead of the proxy's env-var-only filtering, and no read access to the login token.
 # A harness without a `sandboxed_command` just runs its plain `command` (no error);
 # explicitly passing `--bash-sandbox` for such a harness is refused. `BASH_SANDBOX=0` in
 # the environment/run.local.sh turns it off permanently. See README.md.
@@ -111,7 +129,11 @@
 # ~/.claude.json. Without either, ~/.config/agentcontainer.env is used if it exists;
 # `--no-env-file` (or ENV_FILE=off) skips it. Names the sandbox itself relies on (proxy
 # settings, HOME, HOST_*, the flags above) are refused, so an env file can't quietly
-# switch them off.
+# switch them off. So are LD_*, GCONV_PATH and OPENSSL_*: docker hands the env file to
+# entrypoint.sh's root phase too, where the dynamic loader honours them (no setuid, so no
+# secure-execution mode) - LD_LIBRARY_PATH into the project would load agent-planted code as root.
+# Likewise OPENSSL_CONF/OPENSSL_MODULES for the openssl/update-ca-certificates calls the
+# root phase makes for --ca-cert and --inspect (a config can load an engine/provider .so).
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -129,12 +151,22 @@ cli_bash_sandbox=0
 cli_no_bash_sandbox=0
 cli_env_file=""
 no_env_file=0
-cli_squid_logs=""   # "" = not passed, "1" = --squid-logs, "0" = --no-squid-logs
-cli_squid_log_dir=""
+cli_proxy_logs=""   # "" = not passed, "1" = --proxy-logs, "0" = --no-proxy-logs
+cli_proxy_log_dir=""
+cli_inspect=""      # "" = not passed, "1" = --inspect
 cli_mounts=()
+cli_ca_certs=()  # --ca-cert host paths (CA files to import into the container trust store)
 args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    # Deprecated squid-era names (the proxy is mitmproxy now): still accepted, with a
+    # warning, so an old alias or muscle memory doesn't get forwarded to the harness as
+    # an unknown option.
+    --squid-logs|--squid-logs=*|--no-squid-logs)
+      echo "run.sh: warning: $1 is deprecated, use ${1/squid-logs/proxy-logs}" >&2
+      set -- "${1/squid-logs/proxy-logs}" "${@:2}"
+      continue
+      ;;
     --host-network) host_network=1; shift ;;
     --bash-sandbox) cli_bash_sandbox=1; shift ;;
     --no-bash-sandbox) cli_no_bash_sandbox=1; shift ;;
@@ -147,17 +179,18 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --no-env-file) no_env_file=1; shift ;;
-    --squid-logs) cli_squid_logs=1; shift ;;
-    --squid-logs=*)
-      cli_squid_logs=1
-      cli_squid_log_dir="${1#*=}"
-      if [[ -z "$cli_squid_log_dir" ]]; then
-        echo "run.sh: --squid-logs= requires a path (or use plain --squid-logs for the default)" >&2
+    --proxy-logs) cli_proxy_logs=1; shift ;;
+    --proxy-logs=*)
+      cli_proxy_logs=1
+      cli_proxy_log_dir="${1#*=}"
+      if [[ -z "$cli_proxy_log_dir" ]]; then
+        echo "run.sh: --proxy-logs= requires a path (or use plain --proxy-logs for the default)" >&2
         exit 1
       fi
       shift
       ;;
-    --no-squid-logs) cli_squid_logs=0; shift ;;
+    --no-proxy-logs) cli_proxy_logs=0; shift ;;
+    --inspect) cli_inspect=1; shift ;;
     -h|--help) show_help=1; shift ;;
     --allow-internet) allow_internet=1; shift ;;
     --allow-container) allow_container=1; shift ;;
@@ -192,6 +225,14 @@ while [[ $# -gt 0 ]]; do
       else
         cli_mounts+=("$2:$2")
       fi
+      shift 2
+      ;;
+    --ca-cert)
+      if [[ $# -lt 2 ]]; then
+        echo "run.sh: --ca-cert requires a host path to a CA certificate file" >&2
+        exit 1
+      fi
+      cli_ca_certs+=("$2")
       shift 2
       ;;
     *) args+=("$1"); shift ;;
@@ -237,22 +278,50 @@ fi
 # your settings point at. Missing entries are skipped.
 EXTRA_MOUNTS=()
 EXTRA_CONFIG_RO_PATHS=()
+# Additional root CA cert files (host paths) to import into the container's trust store
+# at session start - see --ca-cert. run.local.sh can list personal defaults (e.g. a
+# corporate root CA) here permanently; --ca-cert adds to them per session.
+CA_CERTS=()
 # Seeded from the environment so a one-off `HARNESS=x run.sh` / `CONTAINER_UID=1234
 # run.sh` works; run.local.sh can set them permanently.
 HARNESS="${HARNESS:-claude}"
 CONTAINER_UID="${CONTAINER_UID:-}"
 CONTAINER_GID="${CONTAINER_GID:-}"
-BASH_SANDBOX="${BASH_SANDBOX:-}"
-WITH_DOCKER="${WITH_DOCKER:-}"
 ENV_FILE="${ENV_FILE:-}"
-SQUID_LOGS="${SQUID_LOGS:-}"
-SQUID_LOG_DIR="${SQUID_LOG_DIR:-}"
+# Not seeded from the environment: settings that loosen the sandbox or change what is
+# logged (nested Docker = --privileged, Bash sandbox off, TLS interception, log
+# mirroring) count only when run.local.sh or a flag asks for them. These names are
+# generic enough that an unrelated `export WITH_DOCKER=1` / `INSPECT=1` in the user's
+# shell would otherwise apply to every session. Unset (not just emptied), since
+# run.local.sh is sourced into this shell and would otherwise see the exported value as
+# already set.
+unset WITH_DOCKER BASH_SANDBOX PROXY_LOGS PROXY_LOG_DIR INSPECT SQUID_LOGS SQUID_LOG_DIR
+WITH_DOCKER=""
+BASH_SANDBOX=""
+PROXY_LOGS=""
+PROXY_LOG_DIR=""
+INSPECT=""
 if [[ -f "$script_dir/config/run.local.sh" ]]; then
   . "$script_dir/config/run.local.sh"
 fi
+# Deprecated squid-era settings (run.local.sh only, like the new names): honoured when the new
+# name isn't set, with a warning - otherwise an old run.local.sh would silently stop
+# saving logs.
+if [[ -n "${SQUID_LOGS:-}" ]]; then
+  echo "run.sh: warning: SQUID_LOGS is deprecated, rename it to PROXY_LOGS (config/run.local.sh)" >&2
+  [[ -z "$PROXY_LOGS" ]] && PROXY_LOGS="$SQUID_LOGS"
+fi
+if [[ -n "${SQUID_LOG_DIR:-}" ]]; then
+  echo "run.sh: warning: SQUID_LOG_DIR is deprecated, rename it to PROXY_LOG_DIR (config/run.local.sh)" >&2
+  [[ -z "$PROXY_LOG_DIR" ]] && PROXY_LOG_DIR="$SQUID_LOG_DIR"
+fi
 
 harness="${cli_harness:-$HARNESS}"
-if [[ "$WITH_DOCKER" == 1 ]]; then with_docker=1; fi
+with_docker_src="--with-docker passed"
+if [[ "$with_docker" -eq 0 && "$WITH_DOCKER" == 1 ]]; then
+  with_docker=1
+  with_docker_src="WITH_DOCKER=1 in run.local.sh"
+fi
 if [[ "$allow_container" -eq 1 && "$with_docker" -eq 1 ]]; then
   echo "run.sh: --allow-container and --with-docker/--sysbox (or WITH_DOCKER=1 in run.local.sh) are mutually exclusive" >&2
   exit 1
@@ -264,28 +333,39 @@ if [[ ! -f "$harness_conf_file" ]]; then
 fi
 image="agentcontainer:$harness"
 
-# Squid logs to the host: --squid-logs / --no-squid-logs override SQUID_LOGS=1 in
+# Additional root CA certs to import: run.local.sh's CA_CERTS plus any --ca-cert.
+# Existence is validated at mount time below - a missing host path would otherwise make
+# Docker create a directory at the bind target instead of binding the CA file.
+all_ca_certs=(${CA_CERTS[@]+"${CA_CERTS[@]}"} ${cli_ca_certs[@]+"${cli_ca_certs[@]}"})
+
+# TLS interception: --inspect overrides INSPECT=1 in run.local.sh. Off by
+# default - see the header comment for why.
+inspect=0
+if [[ "$cli_inspect" == 1 || "$INSPECT" == 1 ]]; then
+  inspect=1
+fi
+# Proxy logs to the host: --proxy-logs / --no-proxy-logs override PROXY_LOGS=1 in
 # run.local.sh (see the header comment). The per-session directory name carries a
 # timestamp and the harness so sessions are greppable/ sortable afterwards; a second
 # session started in the same second gets the PID appended. The directory is only
 # created on the real (non---help) path below.
-squid_logs=0
-squid_log_dir=""
-if [[ "$cli_squid_logs" == 0 ]]; then
-  squid_logs_desc="off (--no-squid-logs passed)"
-elif [[ "$cli_squid_logs" == 1 ]]; then
-  squid_logs=1
-elif [[ "$SQUID_LOGS" == 1 ]]; then
-  squid_logs=1
-  squid_logs_desc="on (SQUID_LOGS=1)"
+proxy_logs=0
+proxy_log_dir=""
+if [[ "$cli_proxy_logs" == 0 ]]; then
+  proxy_logs_desc="off (--no-proxy-logs passed)"
+elif [[ "$cli_proxy_logs" == 1 ]]; then
+  proxy_logs=1
+elif [[ "$PROXY_LOGS" == 1 ]]; then
+  proxy_logs=1
+  proxy_logs_desc="on (PROXY_LOGS=1)"
 fi
-if [[ "$squid_logs" -eq 1 ]]; then
-  squid_log_base="${cli_squid_log_dir:-$SQUID_LOG_DIR}"
-  # expand a leading ~ typed as --squid-logs=~/... (bash doesn't in that position)
-  squid_log_base="${squid_log_base/#~/$HOME}"
-  [[ -z "$squid_log_base" ]] && squid_log_base="$HOME/.local/state/agentcontainer/logs"
-  squid_log_dir="$squid_log_base/$(date +%Y-%m-%d-%H%M%S)-$harness"
-  [[ -e "$squid_log_dir" ]] && squid_log_dir="$squid_log_dir-$$"
+if [[ "$proxy_logs" -eq 1 ]]; then
+  proxy_log_base="${cli_proxy_log_dir:-$PROXY_LOG_DIR}"
+  # expand a leading ~ typed as --proxy-logs=~/... (bash doesn't in that position)
+  proxy_log_base="${proxy_log_base/#~/$HOME}"
+  [[ -z "$proxy_log_base" ]] && proxy_log_base="$HOME/.local/state/agentcontainer/logs"
+  proxy_log_dir="$proxy_log_base/$(date +%Y-%m-%d-%H%M%S)-$harness"
+  [[ -e "$proxy_log_dir" ]] && proxy_log_dir="$proxy_log_dir-$$"
 fi
 
 # See harnesses/README.md for the keys. Space-separated lists; last line wins.
@@ -321,8 +401,8 @@ fi
 # --env-file, else ENV_FILE from the environment/run.local.sh, else the default path if
 # that file exists (a missing default is skipped quietly - not everyone has secrets).
 # --no-env-file / ENV_FILE=off turn the default off too. Docker parses the file itself; the names are only collected here so entrypoint.sh can keep them through
-# sudo, and checked against the variables this sandbox relies on: an env file setting
-# e.g. SQUID_ALLOW_INTERNET=1 or HTTPS_PROXY= would otherwise quietly undo the egress
+# the drop to dev (which starts from an empty environment), and checked against the variables this sandbox relies on: an env file setting
+# e.g. AGENTCONTAINER_ALLOW_INTERNET=1 or HTTPS_PROXY= would otherwise quietly undo the egress
 # allowlist. Docker env file format: KEY=value, or a bare KEY to copy it from this
 # shell's environment; # starts a comment line.
 if [[ "$no_env_file" -eq 1 && -n "$cli_env_file" ]]; then
@@ -372,7 +452,7 @@ if [[ -n "$env_file" ]]; then
       exit 1
     fi
     case "$key" in
-      HOME|PATH|USER|SHELL|SUDO_*|HOST_*|AGENTCONTAINER_*|SQUID_*|ALLOW_CONTAINER|WITH_DOCKER|[Hh][Tt][Tt][Pp]_[Pp][Rr][Oo][Xx][Yy]|[Hh][Tt][Tt][Pp][Ss]_[Pp][Rr][Oo][Xx][Yy]|[Nn][Oo]_[Pp][Rr][Oo][Xx][Yy]|[Aa][Ll][Ll]_[Pp][Rr][Oo][Xx][Yy])
+      HOME|PATH|USER|SHELL|SUDO_*|HOST_*|AGENTCONTAINER_*|LD_*|GCONV_PATH|OPENSSL_*|INSPECT|PROXY_LOGS|PROXY_LOG_DIR|ALLOW_CONTAINER|WITH_DOCKER|[Hh][Tt][Tt][Pp]_[Pp][Rr][Oo][Xx][Yy]|[Hh][Tt][Tt][Pp][Ss]_[Pp][Rr][Oo][Xx][Yy]|[Nn][Oo]_[Pp][Rr][Oo][Xx][Yy]|[Aa][Ll][Ll]_[Pp][Rr][Oo][Xx][Yy])
         echo "run.sh: $env_file: '$key' is reserved by the sandbox and can't be set from an env file" >&2
         exit 1
         ;;
@@ -418,9 +498,9 @@ if [[ "$show_help" -eq 1 ]]; then
   cat <<EOF
 Usage: run.sh [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
               [--allow-container | --with-docker [--sysbox]] [--allow-config]
-              [--mount <path|host:container[:ro]>]...
+              [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
               [--no-bash-sandbox] [--env-file <path> | --no-env-file]
-              [--squid-logs[=<path>] | --no-squid-logs]
+              [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect]
               [-h|--help] [harness-args... | command...]
 
 Launches a fresh, disposable sandbox container scoped to \$PWD. Only \$PWD and the
@@ -436,19 +516,27 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     every host service on 127.0.0.1 and skips the nftables egress
                     firewall (it would alter the host's ruleset). Consumed here,
                     never forwarded to docker/the harness.
-  --allow-list PATH Replace the squid egress allowlist for this session only, with
+  --allow-list PATH Replace the egress allowlist for this session only, with
                     PATH (one domain per line, same format as allowed-domains.txt).
                     Doesn't touch the image or other sessions. Consumed here, never
                     forwarded to docker/the harness.
-  --allow-internet  Full internet for this session only: drops squid's domain and port
+  --allow-internet  Full internet for this session only: drops the proxy's domain and port
                     allowlists AND the nftables egress firewall - any host (bare IPs
                     too) on any port, proxied or direct. Mutually exclusive with --allow-list.
                     Consumed here, never forwarded to docker/the harness.
   --mount SPEC      Add one extra bind mount for this session only. A bare PATH mounts
                     read-write at that same path on both sides; use host:container[:ro]
                     to mount elsewhere or read-only. Repeatable. On top of run.local.sh's
-                    EXTRA_MOUNTS, not a replacement for it. Consumed here, never
-                    forwarded to docker/the harness.
+                     EXTRA_MOUNTS, not a replacement for it. Consumed here, never
+                     forwarded to docker/the harness.
+  --ca-cert PATH    Import an extra root CA certificate (host file) into the container's
+                    trust store for this session only - e.g. a corporate root CA, so an
+                    internal host signed by it is trusted instead of failing with a
+                    certificate error (by the in-container clients by default, by
+                    mitmproxy's upstream check under --inspect). PEM or DER. Read-only mount; only
+                    this container's store is touched, never the host's. Repeatable. Adds to
+                    run.local.sh's CA_CERTS. Consumed here, never forwarded to docker/the
+                    harness. **no rebuild** (runtime).
   --allow-container Bind-mount the HOST's own Docker socket in, instead of a nested
                     dockerd. Containers started this way run on the host daemon as
                     siblings, not nested inside the sandbox - host-visible, not cleaned up
@@ -487,19 +575,27 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     the session, e.g. tokens MCP servers reference as \${VAR}. Overrides
                     ENV_FILE from run.local.sh, which overrides the default
                     ~/.config/agentcontainer.env (used if it exists). Variables the
-                    sandbox relies on (proxy settings, HOME, HOST_*, ...) are refused.
+                    sandbox relies on (proxy settings, HOME, HOST_*, LD_*, ...) are refused.
                     Consumed here, never forwarded to docker/the harness.
   --no-env-file     Pass no env file this session, not even the default (ENV_FILE=off
                     in run.local.sh does the same permanently). Consumed here, never
                     forwarded to docker/the harness.
-  --squid-logs      Save this session's squid logs (access, cache, stderr) to the host,
-                    in ~/.local/state/agentcontainer/logs/<timestamp>-<harness>/
-                    (--squid-logs=<path> or SQUID_LOG_DIR in run.local.sh changes the
+  --proxy-logs      Save this session's proxy logs (mitmdump's own log + the addon's JSONL
+                    flow log) to the host, in
+                    ~/.local/state/agentcontainer/logs/<timestamp>-<harness>/
+                    (--proxy-logs=<path> or PROXY_LOG_DIR in run.local.sh changes the
                     base dir). entrypoint.sh mirrors them out of the container; the
-                    files end up owned by you. SQUID_LOGS=1 in run.local.sh makes it
+                    files end up owned by you. PROXY_LOGS=1 in run.local.sh makes it
                     the default. Consumed here, never forwarded to docker/the harness.
-  --no-squid-logs   Don't save the squid logs this session, even with SQUID_LOGS=1 set
+  --no-proxy-logs   Don't save the proxy logs this session, even with PROXY_LOGS=1 set
                     (they stay in the container's /tmp and die with it). Consumed here,
+                    never forwarded to docker/the harness.
+  --inspect         TLS interception for this session: mitmproxy decrypts HTTPS with a
+                    throwaway CA trusted only inside the container, so the flow log records
+                    full request/response detail including message bodies (known secret
+                    shapes redacted in the logged copy). Adds a failure mode to every HTTPS
+                    call and breaks TLS pinning - opt-in; HTTPS is tunneled undecrypted by
+                    default. INSPECT=1 in run.local.sh makes it the default. Consumed here,
                     never forwarded to docker/the harness.
 
 Anything else starting with '-' is forwarded to the harness itself (e.g. --continue).
@@ -512,12 +608,13 @@ Effective config on this machine:
   Network:        $([[ "$host_network" -eq 1 ]] && echo "host (--host-network passed)" || echo "bridge (default; pass --host-network to change)")
   Runtime:        $([[ "$allow_container" -eq 1 ]] && echo "plain runc, unprivileged (host socket mounted; no nested dockerd to privilege)" || { [[ "$with_docker" -eq 1 ]] && { [[ "$sysbox" -eq 1 ]] && echo "sysbox-runc (--sysbox passed)" || { docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc && echo "sysbox-runc (auto: registered on this host)" || echo "--privileged (--with-docker; install sysbox-runc for user-namespace isolation instead)"; }; } || echo "plain runc, unprivileged (default; pass --with-docker for a nested dockerd)"; })
   Allowlist:      $([[ "$allow_internet" -eq 1 ]] && echo "DISABLED (--allow-internet passed - any host/port reachable, nftables egress firewall also off)" || { [[ -n "$allow_list" ]] && echo "$allow_list (--allow-list passed, overrides image default)" || echo "image default (allowed-domains.txt baked in at build; pass --allow-list to override)"; })
-  Docker socket:  $([[ "$allow_container" -eq 1 ]] && echo "HOST /var/run/docker.sock (--allow-container passed - root-equivalent host access)" || { [[ "$with_docker" -eq 1 ]] && echo "nested dockerd in the container (--with-docker passed)" || echo "none (default; pass --with-docker for a nested dockerd, --allow-container for the host daemon)"; })
+  Docker socket:  $([[ "$allow_container" -eq 1 ]] && echo "HOST /var/run/docker.sock (--allow-container passed - root-equivalent host access)" || { [[ "$with_docker" -eq 1 ]] && echo "nested dockerd in the container ($with_docker_src)" || echo "none (default; pass --with-docker for a nested dockerd, --allow-container for the host daemon)"; })
   Harness config: $([[ "$allow_config" -eq 1 ]] && echo "WRITABLE (--allow-config passed - edits persist on the host)" || echo "read-only (default; pass --allow-config to let the harness change it)")
   dev UID:GID:    $remap_desc
   Bash sandbox:   $bash_sandbox_desc
   Env file:       $([[ -n "$env_file" ]] && echo "$env_file ($env_file_desc: ${env_keys:-no variables})" || echo "$env_file_desc")
-  Squid logs:     $([[ "$squid_logs" -eq 1 ]] && echo "$squid_log_dir (mirrored to the host)" || echo "${squid_logs_desc:-container-only (/tmp, discarded on exit; --squid-logs or SQUID_LOGS=1 to save them)}")
+  Proxy logs:     $([[ "$proxy_logs" -eq 1 ]] && echo "$proxy_log_dir (mirrored to the host)" || echo "${proxy_logs_desc:-container-only (/tmp, discarded on exit; --proxy-logs or PROXY_LOGS=1 to save them)}")
+  TLS inspect:    $( [[ "$inspect" -eq 1 ]] && echo "ON (--inspect: HTTPS decrypted, bodies logged - expect breakage)" || echo "off (HTTPS tunneled undecrypted; --inspect to intercept)")
   Mounts:
     $PWD -> $PWD
 EOF
@@ -559,6 +656,14 @@ EOF
       echo "    $mount (from --mount)"
     done
   fi
+  if [[ ${#all_ca_certs[@]} -gt 0 ]]; then
+    echo "  Extra root CAs:  ${#all_ca_certs[@]} to import (run.local.sh CA_CERTS + --ca-cert):"
+    for cert in "${all_ca_certs[@]}"; do
+      echo "    $cert"
+    done
+  else
+    echo "  Extra root CAs:  none (pass --ca-cert or set CA_CERTS in run.local.sh to trust a private root)"
+  fi
   exit 0
 fi
 
@@ -593,8 +698,11 @@ done
 # inside the container - surfacing in Claude Code's case as a "cache-miss" error on
 # whatever it registered last. HOST_HOME carries the host's $HOME into the container so
 # entrypoint.sh can point dev's own $HOME at the same path (see entrypoint.sh).
+# --init: docker-init is PID 1 (forwards signals, reaps orphans). entrypoint.sh drops to
+# dev by exec'ing straight into the harness, so without it the harness itself would be
+# PID 1 - an un-handled SIGTERM to PID 1 is ignored, and orphans would pile up as zombies.
 docker_args=(
-  --rm -it
+  --rm -it --init
   -v "$PWD:$PWD"
   -w "$PWD"
   -e "HOST_HOME=$HOME"
@@ -663,6 +771,26 @@ elif [[ "$with_docker" -eq 1 ]]; then
   fi
 fi
 
+# The Bash sandbox (harness.conf `sandboxed_command`, e.g. Claude Code's bubblewrap)
+# creates user/pid/net namespaces and mounts a fresh /proc for every command. A plain
+# unprivileged container blocks both: Docker's default seccomp profile only allows
+# unshare/clone-with-namespaces/mount to CAP_SYS_ADMIN, and the kernel refuses a fresh
+# procfs while Docker's masked /proc paths (/proc/kcore, /proc/sys, ...) are overmounted.
+# So for those sessions: Docker's own default profile plus those syscalls
+# (lib/seccomp-userns.json; the kernel still demands the capabilities *inside* the new
+# user namespace, as on any host with unprivileged userns), and systempaths=unconfined.
+# The latter lifts the /proc masks for the whole container, and many /proc/sys knobs
+# (e.g. kernel/core_pattern, which runs a host command on a crash) need only uid 0 plus
+# write access - no capability. Without userns-remap container root is host root, so
+# root code in such a container is a host escape. Mitigation: no root process outlives
+# the entrypoint's root phase (it execs setpriv to dev; mitmdump runs as agentproxy,
+# docker-init as PID 1 only reaps), and dev has no sudo/setuid path back to root.
+# Not needed (and not added) under --privileged or sysbox, which allow both already.
+if [[ "$bash_sandbox" -eq 1 && "$with_docker" -eq 0 ]]; then
+  docker_args+=(--security-opt "seccomp=$script_dir/lib/seccomp-userns.json"
+                --security-opt systempaths=unconfined)
+fi
+
 if [[ "$host_network" -eq 1 ]]; then
   echo "run.sh: WARNING: --host-network shares the HOST's network namespace: the" >&2
   echo "run.sh: container reaches every host service on 127.0.0.1, the nftables egress" >&2
@@ -676,32 +804,34 @@ else
   docker_args+=(--cap-add NET_ADMIN)
 fi
 
-# entrypoint.sh overwrites the image's baked-in allowed-domains.txt with this file
-# (if mounted) before starting squid - see entrypoint.sh.
+# entrypoint.sh overwrites the image's baked-in allowed-hosts.txt with this file
+# (if mounted) before starting the proxy - see entrypoint.sh.
 if [[ -n "$allow_list" ]]; then
-  docker_args+=(-v "$allow_list:/etc/squid/allowed-domains.override.txt:ro")
+  docker_args+=(-v "$allow_list:/etc/agentcontainer/allowed-hosts.override.txt:ro")
 fi
 
-# entrypoint.sh patches squid.conf to drop the domain allowlist check when this is set -
-# see entrypoint.sh.
+# the mitmproxy addon skips its domain/port checks when this is set - see entrypoint.sh.
 if [[ "$allow_internet" -eq 1 ]]; then
-  docker_args+=(-e "SQUID_ALLOW_INTERNET=1")
+  docker_args+=(-e "AGENTCONTAINER_ALLOW_INTERNET=1")
+fi
+if [[ "$inspect" -eq 1 ]]; then
+  docker_args+=(-e "INSPECT=1")
 fi
 
-# entrypoint.sh mirrors squid's /tmp logs into this read-write per-session mount (see
+# entrypoint.sh mirrors the proxy's /tmp logs into this read-write per-session mount (see
 # the header comment). Created here, not at resolution time, so --help doesn't leave an
 # empty directory behind.
-if [[ "$squid_logs" -eq 1 ]]; then
-  if ! mkdir -p "$squid_log_dir" 2>/dev/null; then
-    echo "run.sh: can't create the squid log dir $squid_log_dir - if a parent of it is root-owned (an older docker run creating a missing mount source as root), repair with: sudo chown -R \"\$USER\": \"$squid_log_base\"" >&2
+if [[ "$proxy_logs" -eq 1 ]]; then
+  if ! mkdir -p "$proxy_log_dir" 2>/dev/null; then
+    echo "run.sh: can't create the proxy log dir $proxy_log_dir - if a parent of it is root-owned (an older docker run creating a missing mount source as root), repair with: sudo chown -R \"\$USER\": \"$proxy_log_base\"" >&2
     exit 1
   fi
-  docker_args+=(-v "$squid_log_dir:/var/log/agentcontainer")
+  docker_args+=(-v "$proxy_log_dir:/var/log/agentcontainer")
   # Also mount the base itself rw at the same path, so a run.sh started from *inside*
   # a sandbox can create its own session dir there: without it the default base's
   # parents in the container are just Docker's root-owned mount scaffolding, not the
   # host's real log tree.
-  docker_args+=(-v "$squid_log_base:$squid_log_base")
+  docker_args+=(-v "$proxy_log_base:$proxy_log_base")
 fi
 
 # entrypoint.sh starts the harness's sandboxed_command instead of its command (or the
@@ -734,6 +864,26 @@ fi
 if [[ ${#cli_mounts[@]} -gt 0 ]]; then
   for mount in "${cli_mounts[@]}"; do
     docker_args+=(-v "$mount")
+  done
+fi
+
+# --ca-cert / CA_CERTS: bind each CA file read-only under /etc/agentcontainer/ca-certs/;
+# entrypoint.sh imports them into the container's trust store at start. Validate they're
+# existing files first - Docker would otherwise mkdir the missing path at the target.
+# Made absolute first (like --allow-list): docker -v treats a source without a `/` as a
+# named volume, so `--ca-cert corp.crt` would mount an empty volume and import nothing.
+# The target name is prefixed with an index so two files with the same basename (from
+# different directories) don't collide on one mount point.
+if [[ ${#all_ca_certs[@]} -gt 0 ]]; then
+  ca_index=0
+  for cert in "${all_ca_certs[@]}"; do
+    if [[ ! -f "$cert" ]]; then
+      echo "run.sh: --ca-cert file not found: $cert" >&2
+      exit 1
+    fi
+    cert="$(cd "$(dirname "$cert")" && pwd)/$(basename "$cert")"
+    ca_index=$((ca_index + 1))
+    docker_args+=(-v "$cert:/etc/agentcontainer/ca-certs/$ca_index-$(basename "$cert"):ro")
   done
 fi
 

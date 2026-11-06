@@ -1,6 +1,6 @@
 # Default egress allowlist, shared by every harness. The image's final list is this file
 # + harnesses/<name>/allowed-domains.txt + your own config/allowed-domains.txt.
-# Squid dstdomain ACL: one entry per line. A leading "." matches the domain itself and
+# One entry per line. A leading "." matches the domain itself and
 # every subdomain; without it, only that exact host matches.
 
 # npm registry

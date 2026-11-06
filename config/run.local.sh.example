@@ -16,6 +16,13 @@ EXTRA_MOUNTS=(
   # "$HOME/Obsidian:$HOME/Obsidian"
 )
 
+# Root CA cert files (host paths) to import into the container's trust store at every
+# session start - e.g. a corporate root CA, so an internal host signed by it is trusted
+# (by the in-container clients, and under --inspect by mitmproxy's upstream check). Adds to --ca-cert; only this container's store is touched.
+CA_CERTS=(
+  # "$HOME/certs/MyCorp-Root-CA.crt"
+)
+
 # More paths (relative to $HOME) to keep read-only unless --allow-config, on top of the
 # harness's own `config` list in harness.conf - e.g. a statusline script your Claude
 # Code settings point at:
@@ -46,11 +53,14 @@ EXTRA_MOUNTS=(
 # without this if it exists; set a different path here, or off to pass none.
 # ENV_FILE="$HOME/.config/agentcontainer.env"
 
-# Save every session's squid logs (access, cache, stderr) to the host instead of
-# letting them die with the container: a per-session directory under
+# Save every session's proxy logs (mitmdump's own log + the addon's JSONL flow log) to
+# the host instead of letting them die with the container: a per-session directory under
 # ~/.local/state/agentcontainer/logs/<timestamp>-<harness>/ gets mirrored into by
-# entrypoint.sh. Set SQUID_LOG_DIR to keep them somewhere else. --squid-logs enables
-# this for one session, --no-squid-logs disables it even with SQUID_LOGS=1 set here.
+# entrypoint.sh. Set PROXY_LOG_DIR to keep them somewhere else. --proxy-logs enables
+# this for one session, --no-proxy-logs disables it even with PROXY_LOGS=1 set here.
 # See README.md.
-# SQUID_LOGS=1
-# SQUID_LOG_DIR="$HOME/Logs/agentcontainer"
+# PROXY_LOGS=1
+# PROXY_LOG_DIR="$HOME/Logs/agentcontainer"
+# INSPECT=1       # TLS interception (mitmproxy decrypts HTTPS with a throwaway
+                  # in-container CA, bodies logged); breaks TLS-pinning services; off
+                  # by default for a reason
