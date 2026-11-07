@@ -1,0 +1,11 @@
+name: sync-test
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  runner-check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "runner works on this GHES instance"
