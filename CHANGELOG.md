@@ -9,6 +9,10 @@ the change takes effect.
 
 ### Added
 
+- `run.sh`/`run.ps1`: **`ALLOW_INTERNET=1`** in `config/run.local.sh`/`.ps1` makes
+  `--allow-internet` the default on that machine, like `WITH_DOCKER`/`INSPECT`/
+  `PROXY_LOGS` before it - previously the flag was the only way, and an
+  `ALLOW_INTERNET=1` sitting in `run.local.sh` was silently ignored. No rebuild.
 - `image/inspect-proxy.py` *(needs rebuild)*: every logged body dict now carries
   `"bytes"` - the true size before redaction/truncation. Previously a buffered text
   body over the 64K log cap was counted at its truncated length, so `flowlog`'s

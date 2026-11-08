@@ -165,7 +165,6 @@ while ($i -lt $cliArgs.Count) {
   }
 }
 
-if ($allowList -and $allowInternet) { Fail '--allow-list and --allow-internet are mutually exclusive' }
 if ($allowList) {
   $allowList = Resolve-HostPath $allowList
   if (-not (Test-Path -LiteralPath $allowList -PathType Leaf)) { Fail "--allow-list file not found: $allowList" }
@@ -205,12 +204,13 @@ $CONTAINER_UID = $env:CONTAINER_UID
 $CONTAINER_GID = $env:CONTAINER_GID
 $ENV_FILE = $env:ENV_FILE
 # Not seeded from the environment (see run.sh): nested Docker, the Bash sandbox switch,
-# TLS interception and log mirroring count only when run.local.ps1 or a flag sets them.
+# TLS interception, log mirroring and allow-internet count only when run.local.ps1 or a flag sets them.
 $WITH_DOCKER = $null
 $BASH_SANDBOX = $null
 $PROXY_LOGS = $null
 $PROXY_LOG_DIR = $null
 $INSPECT = $null
+$ALLOW_INTERNET = $null
 $localConfig = Join-Path $PSScriptRoot 'config\run.local.ps1'
 if (Test-Path $localConfig) { . $localConfig }
 # Deprecated squid-era settings (run.local.ps1 only, like the new names), see run.sh.
@@ -230,6 +230,12 @@ if (-not $withDocker -and [string]$WITH_DOCKER -eq '1') {
   $withDocker = $true
   $withDockerSrc = '$WITH_DOCKER = 1 in run.local.ps1'
 }
+$allowInternetSrc = '--allow-internet passed'
+if (-not $allowInternet -and [string]$ALLOW_INTERNET -eq '1') {
+  $allowInternet = $true
+  $allowInternetSrc = '$ALLOW_INTERNET = 1 in run.local.ps1'
+}
+if ($allowList -and $allowInternet) { Fail '--allow-list and --allow-internet (or $ALLOW_INTERNET = 1 in run.local.ps1) are mutually exclusive' }
 if ($allowContainer -and $withDocker) {
   Fail '--allow-container and --with-docker (or $WITH_DOCKER = 1 in run.local.ps1) are mutually exclusive'
 }
@@ -358,7 +364,7 @@ if ($CONTAINER_UID -and $CONTAINER_UID -ne 'off') {
 if ($showHelp) {
   if ($hostNetwork) { $netDesc = "host (--host-network passed - Docker Desktop VM's network, not Windows')" }
   else { $netDesc = 'bridge (default; pass --host-network to change)' }
-  if ($allowInternet) { $listDesc = 'DISABLED (--allow-internet passed - any host/port reachable, nftables egress firewall also off)' }
+  if ($allowInternet) { $listDesc = "DISABLED ($allowInternetSrc - any host/port reachable, nftables egress firewall also off)" }
   elseif ($allowList) { $listDesc = "$allowList (--allow-list passed, overrides image default)" }
   else { $listDesc = 'image default (allowed-domains.txt baked in at build; pass --allow-list to override)' }
   if ($allowContainer) { $sockDesc = "Docker Desktop's /var/run/docker.sock (--allow-container passed - root-equivalent access to its VM and every container in it)" }

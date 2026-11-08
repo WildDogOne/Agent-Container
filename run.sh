@@ -50,7 +50,8 @@
 # host (bare IPs included) on any port is reachable.
 # Traffic is still proxied and logged, just no longer filtered. Only affects this
 # disposable container - the image, allowed-domains.txt, and every other session are
-# untouched. Mutually exclusive with --allow-list (one drops the list, the other swaps
+# untouched. ALLOW_INTERNET=1 in run.local.sh makes it the default on this machine.
+# Mutually exclusive with --allow-list (one drops the list, the other swaps
 # it - combining them is almost certainly not what you meant).
 #
 # `--proxy-logs` / `--no-proxy-logs` (consumed here, not forwarded on) save this
@@ -241,11 +242,6 @@ done
 # ${args[@]+...} guard: macOS's bash 3.2 treats an empty array as unbound under set -u.
 set -- ${args[@]+"${args[@]}"}
 
-if [[ -n "$allow_list" && "$allow_internet" -eq 1 ]]; then
-  echo "run.sh: --allow-list and --allow-internet are mutually exclusive" >&2
-  exit 1
-fi
-
 if [[ -n "$allow_list" ]]; then
   if [[ ! -f "$allow_list" ]]; then
     echo "run.sh: --allow-list file not found: $allow_list" >&2
@@ -290,17 +286,18 @@ CONTAINER_GID="${CONTAINER_GID:-}"
 ENV_FILE="${ENV_FILE:-}"
 # Not seeded from the environment: settings that loosen the sandbox or change what is
 # logged (nested Docker = --privileged, Bash sandbox off, TLS interception, log
-# mirroring) count only when run.local.sh or a flag asks for them. These names are
+# mirroring, allow-internet) count only when run.local.sh or a flag asks for them. These names are
 # generic enough that an unrelated `export WITH_DOCKER=1` / `INSPECT=1` in the user's
 # shell would otherwise apply to every session. Unset (not just emptied), since
 # run.local.sh is sourced into this shell and would otherwise see the exported value as
 # already set.
-unset WITH_DOCKER BASH_SANDBOX PROXY_LOGS PROXY_LOG_DIR INSPECT SQUID_LOGS SQUID_LOG_DIR
+unset WITH_DOCKER BASH_SANDBOX PROXY_LOGS PROXY_LOG_DIR INSPECT SQUID_LOGS SQUID_LOG_DIR ALLOW_INTERNET
 WITH_DOCKER=""
 BASH_SANDBOX=""
 PROXY_LOGS=""
 PROXY_LOG_DIR=""
 INSPECT=""
+ALLOW_INTERNET=""
 if [[ -f "$script_dir/config/run.local.sh" ]]; then
   . "$script_dir/config/run.local.sh"
 fi
@@ -321,6 +318,15 @@ with_docker_src="--with-docker passed"
 if [[ "$with_docker" -eq 0 && "$WITH_DOCKER" == 1 ]]; then
   with_docker=1
   with_docker_src="WITH_DOCKER=1 in run.local.sh"
+fi
+allow_internet_src="--allow-internet passed"
+if [[ "$allow_internet" -eq 0 && "$ALLOW_INTERNET" == 1 ]]; then
+  allow_internet=1
+  allow_internet_src="ALLOW_INTERNET=1 in run.local.sh"
+fi
+if [[ -n "$allow_list" && "$allow_internet" -eq 1 ]]; then
+  echo "run.sh: --allow-list and --allow-internet (or ALLOW_INTERNET=1 in run.local.sh) are mutually exclusive" >&2
+  exit 1
 fi
 if [[ "$allow_container" -eq 1 && "$with_docker" -eq 1 ]]; then
   echo "run.sh: --allow-container and --with-docker/--sysbox (or WITH_DOCKER=1 in run.local.sh) are mutually exclusive" >&2
@@ -522,7 +528,8 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     forwarded to docker/the harness.
   --allow-internet  Full internet for this session only: drops the proxy's domain and port
                     allowlists AND the nftables egress firewall - any host (bare IPs
-                    too) on any port, proxied or direct. Mutually exclusive with --allow-list.
+                    too) on any port, proxied or direct. ALLOW_INTERNET=1 in run.local.sh
+                    = default on this machine. Mutually exclusive with --allow-list.
                     Consumed here, never forwarded to docker/the harness.
   --mount SPEC      Add one extra bind mount for this session only. A bare PATH mounts
                     read-write at that same path on both sides; use host:container[:ro]
@@ -607,7 +614,7 @@ Effective config on this machine:
   Image:          $image
   Network:        $([[ "$host_network" -eq 1 ]] && echo "host (--host-network passed)" || echo "bridge (default; pass --host-network to change)")
   Runtime:        $([[ "$allow_container" -eq 1 ]] && echo "plain runc, unprivileged (host socket mounted; no nested dockerd to privilege)" || { [[ "$with_docker" -eq 1 ]] && { [[ "$sysbox" -eq 1 ]] && echo "sysbox-runc (--sysbox passed)" || { docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q sysbox-runc && echo "sysbox-runc (auto: registered on this host)" || echo "--privileged (--with-docker; install sysbox-runc for user-namespace isolation instead)"; }; } || echo "plain runc, unprivileged (default; pass --with-docker for a nested dockerd)"; })
-  Allowlist:      $([[ "$allow_internet" -eq 1 ]] && echo "DISABLED (--allow-internet passed - any host/port reachable, nftables egress firewall also off)" || { [[ -n "$allow_list" ]] && echo "$allow_list (--allow-list passed, overrides image default)" || echo "image default (allowed-domains.txt baked in at build; pass --allow-list to override)"; })
+  Allowlist:      $([[ "$allow_internet" -eq 1 ]] && echo "DISABLED ($allow_internet_src - any host/port reachable, nftables egress firewall also off)" || { [[ -n "$allow_list" ]] && echo "$allow_list (--allow-list passed, overrides image default)" || echo "image default (allowed-domains.txt baked in at build; pass --allow-list to override)"; })
   Docker socket:  $([[ "$allow_container" -eq 1 ]] && echo "HOST /var/run/docker.sock (--allow-container passed - root-equivalent host access)" || { [[ "$with_docker" -eq 1 ]] && echo "nested dockerd in the container ($with_docker_src)" || echo "none (default; pass --with-docker for a nested dockerd, --allow-container for the host daemon)"; })
   Harness config: $([[ "$allow_config" -eq 1 ]] && echo "WRITABLE (--allow-config passed - edits persist on the host)" || echo "read-only (default; pass --allow-config to let the harness change it)")
   dev UID:GID:    $remap_desc

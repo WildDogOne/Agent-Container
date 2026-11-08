@@ -157,7 +157,7 @@ harness. They can go anywhere in the argument list:
 | `--mount PATH` / `--mount HOST:CTR[:ro]` | Extra bind mount. A bare path mounts read-write at the same path on both sides. Repeatable.                                         |
 | `--ca-cert FILE`                         | Import a root CA file into the container's trust store for this session (repeatable; `CA_CERTS` in `run.local.sh` = default). So an internal host signed by a private root CA is trusted - by the in-container clients, and under `--inspect` by mitmproxy's upstream check. Only the container's store changes. |
 | `--allow-list FILE`                      | Replace the whole egress allowlist with `FILE` (same format as `allowed-domains.txt`).                                              |
-| `--allow-internet`                       | Full internet for this session: drop the domain and port allowlists AND the nftables egress firewall (any host, any port; proxied traffic still logged). Can't be combined with `--allow-list`. |
+| `--allow-internet`                       | Full internet for this session: drop the domain and port allowlists AND the nftables egress firewall (any host, any port; proxied traffic still logged). `ALLOW_INTERNET=1` in `run.local.sh` = default. Can't be combined with `--allow-list`. |
 | `--host-network`                         | Share the host's network namespace instead of the bridge network. For VPNs that block the bridge - grants access to host loopback services and skips the nftables egress firewall.      |
 | `--allow-container`                      | Mount the **host's** Docker socket instead of any nested `dockerd`. Root-equivalent, see [below](#docker-inside-the-sandbox). |
 | `--with-docker`                          | Run a nested `dockerd` in the container (with `--privileged`, or sysbox if installed). Off by default, see [below](#docker-inside-the-sandbox). |
@@ -184,7 +184,7 @@ Per-machine settings live in `config/`. Each file there is gitignored and has a 
 |---|---|---|
 | `config/allowed-domains.txt` | `build.sh` | Extra domains to allow, on top of the defaults. See [Network egress](#network-egress). |
 | `config/extra-setup.sh` | `build.sh` | Extra packages or tools baked into the image. See [Customizing the image](#customizing-the-image). |
-| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`), nested Docker by default (`WITH_DOCKER=1`), Bash sandbox off (`BASH_SANDBOX=0`), env file (`ENV_FILE=`), proxy logs to the host (`PROXY_LOGS=1`, `PROXY_LOG_DIR=`). |
+| `config/run.local.sh` | `run.sh` | Default harness (`HARNESS=`), standing mounts (`EXTRA_MOUNTS`), extra read-only paths (`EXTRA_CONFIG_RO_PATHS`), UID override (`CONTAINER_UID`), nested Docker by default (`WITH_DOCKER=1`), Bash sandbox off (`BASH_SANDBOX=0`), env file (`ENV_FILE=`), proxy logs to the host (`PROXY_LOGS=1`, `PROXY_LOG_DIR=`), TLS interception (`INSPECT=1`), full internet (`ALLOW_INTERNET=1`). |
 | `config/run.local.ps1` | `run.ps1` | The same for Windows. |
 
 **Rebuild with `./build.sh` after changing anything in `image/`, `harnesses/`,

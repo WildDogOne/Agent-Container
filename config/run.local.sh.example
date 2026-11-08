@@ -64,3 +64,8 @@ CA_CERTS=(
 # INSPECT=1       # TLS interception (mitmproxy decrypts HTTPS with a throwaway
                   # in-container CA, bodies logged); breaks TLS-pinning services; off
                   # by default for a reason
+
+# Start every session as if --allow-internet was passed: the egress allowlist and the
+# nftables firewall are dropped, any host/port is reachable (still proxied and logged).
+# --allow-internet enables it for one session; mutually exclusive with --allow-list.
+# ALLOW_INTERNET=1
