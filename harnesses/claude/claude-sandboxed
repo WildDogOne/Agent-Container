@@ -107,7 +107,9 @@ fi
 
 # Variables from run.sh --env-file (validated there and in entrypoint.sh): meant for MCP
 # servers, which Claude Code starts outside the sandbox, so Bash doesn't need them.
-env_vars=$(printf '%s' "${AGENTCONTAINER_ENV_KEYS:-}" \
+# run.sh --env values stay visible (they aren't secrets: an orchestrator's session info,
+# e.g. Orca's chat folder). An older run.sh doesn't tell them apart - hide all then.
+env_vars=$(printf '%s' "${AGENTCONTAINER_SECRET_ENV_KEYS-${AGENTCONTAINER_ENV_KEYS:-}}" \
   | jq -R -s 'split(",") | map(select(length > 0)) | map({name: ., mode: "deny"})')
 
 jq -n \

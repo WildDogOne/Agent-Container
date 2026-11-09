@@ -511,6 +511,12 @@ if [ -n "${AGENTCONTAINER_ENV_KEYS:-}" ]; then
     exit 1
   fi
   preserve_env="$preserve_env,$AGENTCONTAINER_ENV_KEYS,AGENTCONTAINER_ENV_KEYS"
+  # Which of them came from the env file (secrets): for a harness Bash sandbox to hide.
+  # (Empty = no env file; grep alone would reject that, it sees no line to match.)
+  if [ -z "${AGENTCONTAINER_SECRET_ENV_KEYS:-}" ] \
+     || printf '%s' "$AGENTCONTAINER_SECRET_ENV_KEYS" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*)*$'; then
+    preserve_env="$preserve_env,AGENTCONTAINER_SECRET_ENV_KEYS"
+  fi
 fi
 # What this session was deliberately given, for a harness Bash sandbox to honour: the
 # read-write extra mounts (run.sh) and the Docker socket (set above). Both are reserved

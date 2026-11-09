@@ -391,6 +391,8 @@ if ($envFile) {
     $envKeys.Add($key)
   }
 }
+# The env file's names only: secrets, hidden from a harness Bash sandbox (--env's aren't).
+$secretKeysJoined = $envKeys -join ','
 foreach ($kv in $cliEnvs) {
   $key = $kv.Split('=')[0]
   Test-EnvName '--env' $key
@@ -550,7 +552,12 @@ foreach ($entry in $harnessStaged) {
 
 $dockerArgs = New-Object System.Collections.Generic.List[string]
 # --init: docker-init is PID 1, not the harness (see run.sh).
-$dockerArgs.AddRange([string[]]@('--rm', '-it', '--init', '-w', $projectTarget, '-e', "HOST_HOME=$homeTarget"))
+$dockerArgs.AddRange([string[]]@('--rm', '-i', '--init', '-w', $projectTarget, '-e', "HOST_HOME=$homeTarget"))
+# A TTY only when both ends are a console, as in run.sh: on pipes docker keeps stdout and
+# stderr apart and passes stdin's EOF on (SDK/ACP clients, scripts).
+if (-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
+    $dockerArgs.Add('-t')
+}
 Add-Bind $projectDir $projectTarget
 
 # Git worktree: mount the main repo's git dir read-write so git works inside the
@@ -664,7 +671,10 @@ if ($bashSandbox) { $dockerArgs.AddRange([string[]]@('-e', 'AGENTCONTAINER_BASH_
 elseif ($sandboxedCommand) { $dockerArgs.AddRange([string[]]@('-e', 'AGENTCONTAINER_BASH_SANDBOX=0')) }
 if ($envFile) { $dockerArgs.AddRange([string[]]@('--env-file', $envFile)) }
 foreach ($kv in $cliEnvs) { $dockerArgs.AddRange([string[]]@('-e', $kv)) }
-if ($envKeysJoined) { $dockerArgs.AddRange([string[]]@('-e', "AGENTCONTAINER_ENV_KEYS=$envKeysJoined")) }
+if ($envKeysJoined) {
+  $dockerArgs.AddRange([string[]]@('-e', "AGENTCONTAINER_ENV_KEYS=$envKeysJoined",
+                                   '-e', "AGENTCONTAINER_SECRET_ENV_KEYS=$secretKeysJoined"))
+}
 
 foreach ($m in @($EXTRA_MOUNTS)) { Add-MountSpec ([string]$m) 'config\run.local.ps1' }
 foreach ($m in $cliMounts) { Add-MountSpec $m '--mount' }

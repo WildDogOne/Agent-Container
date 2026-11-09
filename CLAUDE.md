@@ -94,7 +94,9 @@ the UID remap moved `dev`). Parsed by `run.sh` (bash), `run.ps1`, and `entrypoin
 (only `command`, `sandboxed_command` and `owned`, from the copy baked into
 `/etc/agentcontainer/`). `run.sh --env-file` passes a docker env file through and lists
 its variable names in `AGENTCONTAINER_ENV_KEYS`, which `entrypoint.sh` adds to its
-`preserve_env` list (the drop to `dev` starts from an empty environment); names the sandbox relies on (proxy vars,
+`preserve_env` list (the drop to `dev` starts from an empty environment). `--env` names
+join that list too, but only the env file's go in `AGENTCONTAINER_SECRET_ENV_KEYS`, which
+`claude-sandboxed` hides from Bash. Names the sandbox relies on (proxy vars,
 `HOME`, `HOST_*`, `INSPECT`, `PROXY_LOGS`, `AGENTCONTAINER_*`, ...) are refused in both run scripts, as are the loader's `LD_*`,
 `GCONV_PATH` and `OPENSSL_*` (docker gives env-file vars to `entrypoint.sh`'s root phase too, where root
 honours them - pointing one into the project would load agent-planted code as root).

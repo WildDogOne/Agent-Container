@@ -9,6 +9,16 @@ the change takes effect.
 
 ### Added
 
+- `run.sh`/`run.ps1` run without a TTY when stdin or stdout isn't a terminal (`docker
+  run -i` instead of `-it`). An SDK or ACP client driving the harness over pipes
+  (`claude --output-format stream-json`, `opencode acp`, `claude -p` in a script) now
+  gets clean stdout, stderr apart, and stdin's EOF. Before, `docker run -t` refused to
+  start without a terminal. Interactive use is unchanged. No rebuild.
+- `--env` variables are visible to Claude Code's Bash sandbox (`claude-sandboxed`); only
+  `--env-file` names (secrets) stay hidden from shell commands. `run.sh` passes the
+  env-file names separately as `AGENTCONTAINER_SECRET_ENV_KEYS`; without it (older
+  `run.sh`) every name is hidden as before. **rebuild** (`entrypoint.sh`,
+  `claude-sandboxed`).
 - `run.sh`/`run.ps1` **`--sink <dir>`** (or `$SINK_DIR` in `run.local.sh`/`run.local.ps1`):
   records each finished session as a queryable result under `<dir>`, instead of leaving
   only the raw terminal transcript. On session end the run script writes

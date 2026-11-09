@@ -557,6 +557,10 @@ if [[ -n "$env_file" ]]; then
     env_keys="${env_keys:+$env_keys,}$key"
   done < "$env_file"
 fi
+# The env file's names alone: those are secrets (MCP tokens), which a harness Bash sandbox
+# hides from shell commands (claude-sandboxed). --env values are on run.sh's command line
+# and meant for the session, so they stay visible.
+secret_env_keys="$env_keys"
 # --env NAME=VALUE: passed with docker -e below; the names join env_keys so they survive
 # entrypoint.sh's drop to dev like an env file's.
 for kv in ${cli_envs[@]+"${cli_envs[@]}"}; do
@@ -860,11 +864,19 @@ done
 # dev by exec'ing straight into the harness, so without it the harness itself would be
 # PID 1 - an un-handled SIGTERM to PID 1 is ignored, and orphans would pile up as zombies.
 docker_args=(
-  --rm -it --init
+  --rm -i --init
   -v "$PWD:$PWD"
   -w "$PWD"
   -e "HOST_HOME=$HOME"
 )
+# A TTY only when run.sh has one on both ends. On pipes (an SDK driving `claude
+# --output-format stream-json`, `opencode acp`, `claude -p` in a script) docker keeps
+# stdout and stderr apart and passes stdin's EOF on to the harness; with -t both would
+# be lost (stderr mixed into stdout, no EOF, \r\n line endings), and `docker run -t`
+# refuses to start without a terminal on stdin anyway.
+if [[ -t 0 && -t 1 ]]; then
+  docker_args+=(-t)
+fi
 
 # Git worktree: $PWD/.git is a file pointing into <main-repo>/.git/worktrees/<name>, outside
 # $PWD, so git inside the container would find no repository. Mount the common git dir
@@ -1046,7 +1058,7 @@ for kv in ${cli_envs[@]+"${cli_envs[@]}"}; do
   docker_args+=(-e "$kv")
 done
 if [[ -n "$env_keys" ]]; then
-  docker_args+=(-e "AGENTCONTAINER_ENV_KEYS=$env_keys")
+  docker_args+=(-e "AGENTCONTAINER_ENV_KEYS=$env_keys" -e "AGENTCONTAINER_SECRET_ENV_KEYS=$secret_env_keys")
 fi
 
 # --loopback-socket: each socket is mounted at /run/agentcontainer/loopback/PORT.sock and
