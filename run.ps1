@@ -112,6 +112,7 @@ $noEnvFile = $false
 $cliProxyLogs = ''   # '' = not passed, 'on' = --proxy-logs, 'off' = --no-proxy-logs
 $cliProxyLogDir = ''
 $cliInspect = ''     # '' = not passed, '1' = --inspect
+$cliSinkDir = ''     # --sink base dir ('' = not passed; $SINK_DIR in run.local.ps1 is the default)
 $cliMounts = New-Object System.Collections.Generic.List[string]
 $cliCaCerts = New-Object System.Collections.Generic.List[string]
 $cliLabels = New-Object System.Collections.Generic.List[string]
@@ -150,6 +151,11 @@ while ($i -lt $cliArgs.Count) {
       $i++; continue
     }
     '--inspect'         { $cliInspect = '1'; $i++; continue }
+    '--sink' {
+      if ($i + 1 -ge $cliArgs.Count) { Fail '--sink requires a base directory argument' }
+      $cliSinkDir = [string]$cliArgs[$i + 1]; $i += 2; continue
+    }
+    { $_ -like '--sink=*' } { $cliSinkDir = $a.Substring('--sink='.Length); $i++; continue }
     '--harness' {
       if ($i + 1 -ge $cliArgs.Count) { Fail '--harness requires a harness name' }
       $cliHarness = [string]$cliArgs[$i + 1]; $i += 2; continue
@@ -229,6 +235,7 @@ $PROXY_LOGS = $null
 $PROXY_LOG_DIR = $null
 $INSPECT = $null
 $ALLOW_INTERNET = $null
+$SINK_DIR = $null
 $localConfig = Join-Path $PSScriptRoot 'config\run.local.ps1'
 if (Test-Path $localConfig) { . $localConfig }
 # Deprecated squid-era settings (run.local.ps1 only, like the new names), see run.sh.
@@ -292,6 +299,15 @@ if ($proxyLogs) {
   $proxyLogDir = Join-Path $proxyLogBase ((Get-Date -Format 'yyyy-MM-dd-HHmmss') + '-' + $harnessName)
   if (Test-Path -LiteralPath $proxyLogDir) { $proxyLogDir = "$proxyLogDir-$PID" }
 }
+
+# Session sink: --sink <base> (or $SINK_DIR in run.local.ps1) records a finished session
+# as a queryable result on the host (see run.sh's header comment). Off when the base is
+# empty. Host-side only: tools\sessionlog.py runs after the container exits.
+$sinkBase = ''
+if ($cliSinkDir) { $sinkBase = $cliSinkDir }
+elseif ($SINK_DIR) { $sinkBase = [string]$SINK_DIR }
+if ($sinkBase) { $sinkBase = Resolve-HostPath $sinkBase }
+$sink = [bool]$sinkBase
 
 # See harnesses\README.md for the keys. Space-separated lists; last line wins.
 function Get-HarnessConf([string]$key) {
@@ -406,7 +422,7 @@ Usage: run.ps1 [--harness <name>] [--host-network] [--allow-list <path> | --allo
                [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
                [--no-bash-sandbox] [--env-file <path> | --no-env-file]
                 [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect]
-               [--label <key=value>]...
+               [--sink <dir>] [--label <key=value>]...
                [-h|--help] [harness-args... | command... | -- harness-args...]
 
 Windows/Docker Desktop version of run.sh - same flags, see run.sh --help or README.md
@@ -434,6 +450,7 @@ Effective config on this machine:
   Env file:       $envDesc
   Proxy logs:     $(if ($proxyLogs) { "$proxyLogDir (mirrored to the host)" } elseif ($proxyLogsDesc) { $proxyLogsDesc } else { 'container-only (/tmp, discarded on exit; --proxy-logs or $PROXY_LOGS = 1 to save them)' })
   TLS inspect:    $(if ($inspect) { 'ON (--inspect: HTTPS decrypted, bodies logged - expect breakage)' } else { 'off (HTTPS tunneled undecrypted; --inspect to intercept)' })
+  Sink:           $(if ($sink) { "$sinkBase (record.json + changes.patch + index.jsonl per session)" } else { 'off (pass --sink <dir> or set $SINK_DIR in run.local.ps1 to record finished sessions)' })
   Mounts:
     $projectDir -> $projectTarget
 "@ | Write-Host
@@ -625,7 +642,6 @@ elseif ($sandboxedCommand) { $dockerArgs.AddRange([string[]]@('-e', 'AGENTCONTAI
 if ($envFile) {
   $dockerArgs.AddRange([string[]]@('--env-file', $envFile))
   if ($envKeysJoined) { $dockerArgs.AddRange([string[]]@('-e', "AGENTCONTAINER_ENV_KEYS=$envKeysJoined")) }
-}
 
 foreach ($m in @($EXTRA_MOUNTS)) { Add-MountSpec ([string]$m) 'config\run.local.ps1' }
 foreach ($m in $cliMounts) { Add-MountSpec $m '--mount' }
@@ -651,5 +667,53 @@ $dockerArgs.Add($image)
 $dockerArgs.AddRange($forward)
 
 $finalArgs = $dockerArgs.ToArray()
-& docker.exe run @finalArgs
-exit $LASTEXITCODE
+
+if (-not $sink) {
+  & docker.exe run @finalArgs
+  exit $LASTEXITCODE
+}
+
+# Sink path: capture HEAD before, run the container, then record the finished session on
+# the host (tools\sessionlog.py). The session id is the fleet.session label when present,
+# so Agent-Fleet's `fleet session show <SID>` finds it; otherwise a timestamped id. The
+# harvest runs in `finally` so a Ctrl-C / failed run still records.
+$sinkSession = ''
+foreach ($l in $cliLabels) {
+  if ($l.StartsWith('fleet.session=')) { $sinkSession = $l.Substring('fleet.session='.Length) }
+}
+if (-not $sinkSession) { $sinkSession = (Get-Date -Format 'yyyy-MM-dd-HHmmss') + '-' + $harnessName + '-' + $PID }
+if ($sinkSession -match '[/\\]' -or $sinkSession.StartsWith('.')) {
+  [Console]::Error.WriteLine("run.ps1: --sink: refusing unsafe session id '$sinkSession' - not recording")
+  & docker.exe run @finalArgs
+  exit $LASTEXITCODE
+}
+
+$headBefore = (Invoke-NativeCapture git.exe @('-C', $projectDir, 'rev-parse', 'HEAD'))
+if (-not $headBefore) { $headBefore = '' }
+$startTs = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+$rc = 0
+try {
+  & docker.exe run @finalArgs
+  $rc = $LASTEXITCODE
+} finally {
+  $headAfter = (Invoke-NativeCapture git.exe @('-C', $projectDir, 'rev-parse', 'HEAD'))
+  if (-not $headAfter) { $headAfter = '' }
+  $endTs = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+  $sargs = New-Object System.Collections.Generic.List[string]
+  $sargs.AddRange([string[]]@(
+    '--base', $sinkBase, '--session', $sinkSession, '--harness', $harnessName,
+    '--worktree', $projectDir, '--head-before', $headBefore, '--head-after', $headAfter,
+    '--start', $startTs, '--end', $endTs, '--exit', [string]$rc))
+  foreach ($entry in $harnessState) { $sargs.Add('--state-path'); $sargs.Add((Get-HostHomePath $entry)) }
+  if ($proxyLogs) { $sargs.Add('--flow-dir'); $sargs.Add($proxyLogDir) }
+  $py = Get-Command python3 -ErrorAction SilentlyContinue
+  if (-not $py) { $py = Get-Command python -ErrorAction SilentlyContinue }
+  if ($py) {
+    & $py.Source (Join-Path $PSScriptRoot 'tools\sessionlog.py') @($sargs.ToArray())
+    if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine('run.ps1: --sink: failed to record the session') }
+  } else {
+    [Console]::Error.WriteLine('run.ps1: --sink: no python on the host PATH - session not recorded')
+  }
+}
+exit $rc

@@ -7,6 +7,22 @@ the change takes effect.
 
 ## Unreleased
 
+### Added
+
+- `run.sh`/`run.ps1` **`--sink <dir>`** (or `$SINK_DIR` in `run.local.sh`/`run.local.ps1`):
+  records each finished session as a queryable result under `<dir>`, instead of leaving
+  only the raw terminal transcript. On session end the run script writes
+  `<dir>/<session>/record.json` (git delta: commits made, files changed, diffstat, exit
+  code, timing, harness, proxy-log dir) and `<dir>/<session>/changes.patch`, and appends a
+  one-line summary to `<dir>/index.jsonl`. The session id is the `fleet.session` docker
+  label when present (so Agent-Fleet's `fleet session show <SID>` finds it), else a
+  timestamped id. The record is written by the run script *after* the container exits, so
+  it reflects what the agent actually committed - not something the agent wrote about
+  itself. Off by default; the default (no `--sink`) path is unchanged (`exec docker run`).
+  Host-side only: no new sandbox egress, no change to `entrypoint.sh`. New host-side
+  collector `tools/sessionlog.py` (stdlib Python, runs on the host, not in the image).
+  No rebuild. `run.ps1` mirrors the flag but is not exercised on Windows here.
+
 ### Changed
 
 - `claude-sandboxed` (Bash sandbox) *(needs rebuild)*: **read-write extra mounts are

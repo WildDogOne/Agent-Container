@@ -135,6 +135,18 @@
 # secure-execution mode) - LD_LIBRARY_PATH into the project would load agent-planted code as root.
 # Likewise OPENSSL_CONF/OPENSSL_MODULES for the openssl/update-ca-certificates calls the
 # root phase makes for --ca-cert and --inspect (a config can load an engine/provider .so).
+#
+# `--sink <base>` (consumed here, not forwarded on; SINK_DIR in run.local.sh sets a
+# default base) records a finished session as a queryable result on the HOST instead of
+# letting it vanish with the container: <base>/<session>/record.json (git delta - commits,
+# changed files, branch, HEAD before/after - plus exit code, timing, and pointers to the
+# harness's state dir and the proxy flow log), <base>/<session>/changes.patch, and one
+# line appended to <base>/index.jsonl. It is host-side only: run.sh captures HEAD before
+# the run and, on exit, calls tools/sessionlog.py - it never runs inside the sandbox, adds
+# no egress, and never parses the harness's transcript format (it points at the state dir
+# instead). Off by default; with it off the default path stays a plain `exec docker run`
+# (no post-run hook). An orchestrator's session id (the fleet.session docker label, see
+# --label) names the record; otherwise a timestamped id is used.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -155,6 +167,7 @@ no_env_file=0
 cli_proxy_logs=""   # "" = not passed, "1" = --proxy-logs, "0" = --no-proxy-logs
 cli_proxy_log_dir=""
 cli_inspect=""      # "" = not passed, "1" = --inspect
+cli_sink_dir=""     # --sink base dir ("" = not passed; SINK_DIR in run.local.sh is the default)
 cli_mounts=()
 cli_ca_certs=()  # --ca-cert host paths (CA files to import into the container trust store)
 cli_labels=()    # --label key=value docker labels (e.g. for an orchestrator to find its sessions)
@@ -193,6 +206,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-proxy-logs) cli_proxy_logs=0; shift ;;
     --inspect) cli_inspect=1; shift ;;
+    --sink)
+      if [[ $# -lt 2 ]]; then
+        echo "run.sh: --sink requires a base directory argument" >&2
+        exit 1
+      fi
+      cli_sink_dir="$2"
+      shift 2
+      ;;
+    --sink=*) cli_sink_dir="${1#*=}"; shift ;;
     -h|--help) show_help=1; shift ;;
     --allow-internet) allow_internet=1; shift ;;
     --allow-container) allow_container=1; shift ;;
@@ -312,13 +334,14 @@ ENV_FILE="${ENV_FILE:-}"
 # shell would otherwise apply to every session. Unset (not just emptied), since
 # run.local.sh is sourced into this shell and would otherwise see the exported value as
 # already set.
-unset WITH_DOCKER BASH_SANDBOX PROXY_LOGS PROXY_LOG_DIR INSPECT SQUID_LOGS SQUID_LOG_DIR ALLOW_INTERNET
+unset WITH_DOCKER BASH_SANDBOX PROXY_LOGS PROXY_LOG_DIR INSPECT SQUID_LOGS SQUID_LOG_DIR ALLOW_INTERNET SINK_DIR
 WITH_DOCKER=""
 BASH_SANDBOX=""
 PROXY_LOGS=""
 PROXY_LOG_DIR=""
 INSPECT=""
 ALLOW_INTERNET=""
+SINK_DIR=""
 if [[ -f "$script_dir/config/run.local.sh" ]]; then
   . "$script_dir/config/run.local.sh"
 fi
@@ -394,6 +417,14 @@ if [[ "$proxy_logs" -eq 1 ]]; then
   proxy_log_dir="$proxy_log_base/$(date +%Y-%m-%d-%H%M%S)-$harness"
   [[ -e "$proxy_log_dir" ]] && proxy_log_dir="$proxy_log_dir-$$"
 fi
+
+# Session sink: --sink <base> (or SINK_DIR in run.local.sh) turns a finished session into
+# a queryable record on the host (see the header comment). Off when the base is empty.
+# The base is expanded like --proxy-logs=~/... (bash doesn't expand ~ in that position).
+sink_base="${cli_sink_dir:-$SINK_DIR}"
+sink_base="${sink_base/#~/$HOME}"
+sink=0
+[[ -n "$sink_base" ]] && sink=1
 
 # See harnesses/README.md for the keys. Space-separated lists; last line wins.
 harness_conf() { sed -n "s/^$1=//p" "$harness_conf_file" | tail -n 1; }
@@ -527,7 +558,7 @@ Usage: run.sh [--harness <name>] [--host-network] [--allow-list <path> | --allow
               [--allow-container | --with-docker [--sysbox]] [--allow-config]
               [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
               [--no-bash-sandbox] [--env-file <path> | --no-env-file]
-              [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect]
+              [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect] [--sink <dir>]
               [--label <key=value>]...
               [-h|--help] [harness-args... | command... | -- harness-args...]
 
@@ -626,6 +657,16 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     call and breaks TLS pinning - opt-in; HTTPS is tunneled undecrypted by
                     default. INSPECT=1 in run.local.sh makes it the default. Consumed here,
                     never forwarded to docker/the harness.
+  --sink DIR        Record this session as a queryable result on the host when it ends:
+                    <DIR>/<session>/record.json (git delta - commits, changed files, branch,
+                    HEAD before/after - plus exit code, timing, and pointers to the harness
+                    state dir and the proxy flow log), <DIR>/<session>/changes.patch, and a
+                    line appended to <DIR>/index.jsonl. Host-side only (tools/sessionlog.py
+                    runs after the container exits): it adds no egress and never parses the
+                    harness transcript, it just points at the state dir. Off by default;
+                    SINK_DIR in run.local.sh sets a default base. The record is named by the
+                    fleet.session docker label (--label) when present. Consumed here, never
+                    forwarded to docker/the harness.
   --label K=V       Put a docker label on the session container (metadata only, no effect
                     on the sandbox) - lets an orchestrator such as Agent-Fleet find its
                     sessions. Repeatable. Consumed here, never forwarded to the harness.
@@ -650,6 +691,7 @@ Effective config on this machine:
   Env file:       $([[ -n "$env_file" ]] && echo "$env_file ($env_file_desc: ${env_keys:-no variables})" || echo "$env_file_desc")
   Proxy logs:     $([[ "$proxy_logs" -eq 1 ]] && echo "$proxy_log_dir (mirrored to the host)" || echo "${proxy_logs_desc:-container-only (/tmp, discarded on exit; --proxy-logs or PROXY_LOGS=1 to save them)}")
   TLS inspect:    $( [[ "$inspect" -eq 1 ]] && echo "ON (--inspect: HTTPS decrypted, bodies logged - expect breakage)" || echo "off (HTTPS tunneled undecrypted; --inspect to intercept)")
+  Sink:           $( [[ "$sink" -eq 1 ]] && echo "$sink_base (record.json + changes.patch + index.jsonl on session end)" || echo "off (--sink <dir> or SINK_DIR in run.local.sh to record finished sessions)")
   Mounts:
     $PWD -> $PWD
 EOF
@@ -972,4 +1014,54 @@ if [[ ${#all_ca_certs[@]} -gt 0 ]]; then
   done
 fi
 
-exec docker run "${docker_args[@]}" "$image" "$@"
+# Session sink: with --sink/SINK_DIR on, capture HEAD before the run and record the
+# session on exit (see the header comment). That needs a post-run hook, so this path runs
+# docker WITHOUT exec and installs an EXIT trap. With the sink off the default path stays
+# a plain `exec docker run` - no post-run hook, no changed signal/exit semantics.
+sink_session=""
+if [[ "$sink" -eq 1 ]]; then
+  for label in ${cli_labels[@]+"${cli_labels[@]}"}; do
+    [[ "$label" == fleet.session=* ]] && sink_session="${label#fleet.session=}"
+  done
+  [[ -z "$sink_session" ]] && sink_session="$(date +%Y-%m-%d-%H%M%S)-$harness-$$"
+  if [[ "$sink_session" == */* || "$sink_session" == .* ]]; then
+    echo "run.sh: --sink: refusing unsafe session id '$sink_session' - not recording" >&2
+    sink=0
+  fi
+fi
+
+sink_harvest() {
+  local rc=$?
+  set +e
+  local head_after end_ts state_args=() flow_args=()
+  head_after=""
+  command -v git >/dev/null 2>&1 && head_after="$(git -C "$PWD" rev-parse HEAD 2>/dev/null || true)"
+  end_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for entry in ${harness_state[@]+"${harness_state[@]}"}; do
+    state_args+=(--state-path "$HOME/$entry")
+  done
+  [[ "$proxy_logs" -eq 1 ]] && flow_args+=(--flow-dir "$proxy_log_dir")
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "run.sh: --sink: python3 not found on the host - session not recorded" >&2
+    return
+  fi
+  python3 "$script_dir/tools/sessionlog.py" \
+    --base "$sink_base" --session "$sink_session" --harness "$harness" --worktree "$PWD" \
+    --head-before "${head_before:-}" --head-after "$head_after" \
+    --start "$start_ts" --end "$end_ts" --exit "$rc" \
+    ${state_args[@]+"${state_args[@]}"} ${flow_args[@]+"${flow_args[@]}"} \
+    || echo "run.sh: --sink: failed to record session" >&2
+}
+
+if [[ "$sink" -eq 1 ]]; then
+  head_before=""
+  command -v git >/dev/null 2>&1 && head_before="$(git -C "$PWD" rev-parse HEAD 2>/dev/null || true)"
+  start_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  trap 'sink_harvest' EXIT
+  trap 'exit 130' INT TERM HUP
+  docker run "${docker_args[@]}" "$image" "$@"
+  # set -e: a non-zero `docker run` exits here and the EXIT trap records that exit code;
+  # a clean exit runs the trap too. run.sh's exit status is docker's either way.
+else
+  exec docker run "${docker_args[@]}" "$image" "$@"
+fi
