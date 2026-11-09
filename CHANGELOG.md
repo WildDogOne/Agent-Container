@@ -49,6 +49,20 @@ the change takes effect.
 
 ### Changed
 
+- opencode harness: upgraded to **OpenCode 2** (`npm install -g @opencode/cli`; the
+  `opencode-ai` package is the V1 line and stays at 1.19.x). **rebuild**. No mount or
+  allowlist changes: V2 reads the same config/state locations (`~/.config/opencode`,
+  `~/.local/share/opencode`), still talks to `opencode.ai`/`models.opencode.ai`, and
+  `OPENCODE_DISABLE_AUTOUPDATE` (the install.sh wrapper) is still honoured. V1 config
+  files keep working unmodified; only custom V1 plugins and server-API integrations
+  need porting. The default command is now `opencode --standalone`: V2's CLI otherwise
+  starts a *background service* and writes `service.json` into `~/.config/opencode` -
+  a write into the read-only config mount that fails with EROFS (a private in-process
+  server is also the right fit for a `--rm` container). Behavior note: V2 allows access outside the project directory by
+  default (V1 prompted first) - still confined to the container's mounts, but see the
+  `external_directory` permission in `harnesses/opencode/harness.conf` to restore the
+  prompt. V2's CLI talks to its background service over loopback HTTP; `entrypoint.sh`
+  already excludes loopback from the proxy env (now also `::1`, per V2's docs).
 - `claude-sandboxed` (Bash sandbox) *(needs rebuild)*: **read-write extra mounts are
   writable from sandboxed shell commands.** `run.sh`/`run.ps1` pass the container paths
   of the read-write `--mount`/`EXTRA_MOUNTS` entries as `AGENTCONTAINER_RW_MOUNTS`;

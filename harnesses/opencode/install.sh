@@ -1,10 +1,11 @@
 #!/bin/sh
-# Installs opencode (https://opencode.ai) into the image. Runs as root at build time,
-# after Node is on PATH (see image/Dockerfile). The npm package pulls in the prebuilt
-# binary for this platform; npm's own launcher lands in /usr/bin/opencode.
+# Installs OpenCode 2 (https://opencode.ai) into the image. Runs as root at build time,
+# after Node is on PATH (see image/Dockerfile). OpenCode 2 is the @opencode/cli scope
+# (the old opencode-ai package is the V1 line); the platform-specific native binary
+# comes in as an optionalDependency and npm's bin shim lands in /usr/bin/opencode.
 set -eu
 
-npm install -g opencode-ai
+npm install -g @opencode/cli
 
 # The global npm install is root-owned, so opencode's self-update can't work as dev -
 # and the image is rebuilt (--no-cache) to update anyway. The env var is set in a

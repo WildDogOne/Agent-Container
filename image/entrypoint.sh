@@ -15,7 +15,9 @@ set -eu
 # was already fine.
 export HTTP_PROXY=http://127.0.0.1:3128
 export HTTPS_PROXY=http://127.0.0.1:3128
-export NO_PROXY=localhost,127.0.0.1
+# ::1 too: OpenCode 2's CLI talks to its background service over loopback HTTP and
+# may use the IPv6 loopback - through the proxy that connection would be allowlist-checked.
+export NO_PROXY=localhost,127.0.0.1,::1
 export http_proxy=$HTTP_PROXY
 export https_proxy=$HTTPS_PROXY
 export no_proxy=$NO_PROXY

@@ -26,8 +26,11 @@ cd "$HOME\Agent-Container"
 .\build.ps1 opencode          # agentcontainer:opencode
 ```
 
-`harnesses/opencode/install.sh` installs it with `npm install -g opencode-ai` and wraps
-it so self-update is off. A rebuild picks up the latest release instead.
+`harnesses/opencode/install.sh` installs OpenCode 2 with `npm install -g @opencode/cli`
+and wraps it so self-update is off. A rebuild picks up the latest release instead.
+V1 config (`~/.config/opencode/opencode.json`) keeps working as-is - OpenCode 2 reads
+the same locations and auto-migrates the terminal settings; only custom V1 plugins and
+server-API integrations need porting.
 
 ## 2. Add a shortcut
 
