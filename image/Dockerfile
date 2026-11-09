@@ -181,8 +181,9 @@ RUN cat /tmp/domains/*.txt | sed 's/\r$//; s/#.*//; s/[[:space:]]//g' | grep -v 
 # core.autocrlf=true, or a gitignored file saved in Notepad, would otherwise give the
 # allowlist "example.com\r" entries and the shell scripts a "/bin/sh\r" interpreter.
 # .gitattributes covers tracked files; the per-COPY seds also cover the personal ones.
-COPY image/inspect-proxy.py image/redact_secrets.py /usr/local/lib/agentcontainer/
-RUN sed -i 's/\r$//' /usr/local/lib/agentcontainer/inspect-proxy.py /usr/local/lib/agentcontainer/redact_secrets.py
+COPY image/inspect-proxy.py image/redact_secrets.py image/loopback-forward.py /usr/local/lib/agentcontainer/
+RUN sed -i 's/\r$//' /usr/local/lib/agentcontainer/inspect-proxy.py /usr/local/lib/agentcontainer/redact_secrets.py \
+      /usr/local/lib/agentcontainer/loopback-forward.py
 COPY image/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
 

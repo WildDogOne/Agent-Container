@@ -22,6 +22,20 @@ the change takes effect.
   Host-side only: no new sandbox egress, no change to `entrypoint.sh`. New host-side
   collector `tools/sessionlog.py` (stdlib Python, runs on the host, not in the image).
   No rebuild. `run.ps1` mirrors the flag but is not exercised on Windows here.
+- `run.sh`/`run.ps1` **`--env NAME=VALUE`** (repeatable): one variable for this session,
+  same name rules as `--env-file` (the sandbox's own names are refused), kept through the
+  drop to `dev` via `AGENTCONTAINER_ENV_KEYS`. No rebuild.
+- `run.sh` **`--loopback-socket PORT:SOCKET`** (repeatable) *(needs rebuild)*: makes
+  `127.0.0.1:PORT` inside the container a byte-for-byte forward to the host Unix socket
+  `SOCKET` (new `image/loopback-forward.py`, started by `entrypoint.sh` as `dev`). For
+  tools that report to a fixed loopback port; Agent-Fleet uses it for Orca's agent status
+  hooks. Adds no egress route - the far end of the socket decides what it accepts.
+  Refused with `--host-network`. Linux only: `run.ps1` refuses it.
+- Hermes *(needs rebuild)*: `hermes-session` honours **`HERMES_SESSION_OVERLAY=<dir>`**:
+  `<dir>/plugins/*` are linked into the session's plugins dir next to the shared ones,
+  and `<dir>/config.yaml` is merged into a session copy of the shared `config.yaml`
+  (mappings recursively, lists by appending, comments kept). The host's `~/.hermes` is
+  untouched. Agent-Fleet uses it to enable Orca's status plugin per session.
 
 ### Changed
 

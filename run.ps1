@@ -116,6 +116,7 @@ $cliSinkDir = ''     # --sink base dir ('' = not passed; $SINK_DIR in run.local.
 $cliMounts = New-Object System.Collections.Generic.List[string]
 $cliCaCerts = New-Object System.Collections.Generic.List[string]
 $cliLabels = New-Object System.Collections.Generic.List[string]
+$cliEnvs = New-Object System.Collections.Generic.List[string]
 $forward = New-Object System.Collections.Generic.List[string]
 
 $i = 0
@@ -178,6 +179,17 @@ while ($i -lt $cliArgs.Count) {
         Fail '--label requires a key=value argument'
       }
       $cliLabels.Add([string]$cliArgs[$i + 1]); $i += 2; continue
+    }
+    '--env' {
+      # One NAME=VALUE for this session, same name rules as an env file - see run.sh.
+      if ($i + 1 -ge $cliArgs.Count -or -not ([string]$cliArgs[$i + 1]).Contains('=')) {
+        Fail '--env requires a NAME=VALUE argument'
+      }
+      $cliEnvs.Add([string]$cliArgs[$i + 1]); $i += 2; continue
+    }
+    '--loopback-socket' {
+      # Forwards to a host Unix socket - Linux hosts only (Agent-Fleet), see run.sh.
+      Fail '--loopback-socket is not supported on Windows (it forwards to a host Unix socket; use run.sh on Linux)'
     }
     '--' {
       # End of run.ps1's own flags: the rest goes to the harness verbatim, with its
@@ -357,6 +369,14 @@ elseif ($ENV_FILE) { $envFile = [string]$ENV_FILE; $envFileDesc = '$ENV_FILE' }
 elseif (Test-Path -LiteralPath $defaultEnvFile -PathType Leaf) { $envFile = $defaultEnvFile; $envFileDesc = 'default' }
 else { $envFileDesc = "none ($defaultEnvFile doesn't exist; pass --env-file or set `$ENV_FILE to use another file)" }
 $envKeys = New-Object System.Collections.Generic.List[string]
+# Shared by --env-file and --env: names the sandbox relies on can't be set this way.
+function Test-EnvName([string]$source, [string]$key) {
+  if ($key -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Fail "${source}: invalid variable name '$key'" }
+  if ($key -cmatch '^(HOME|PATH|USER|SHELL|SUDO_.*|HOST_.*|AGENTCONTAINER_.*|LD_.*|GCONV_PATH|OPENSSL_.*|INSPECT|PROXY_LOGS|PROXY_LOG_DIR|ALLOW_CONTAINER|WITH_DOCKER)$' -or
+      $key -match '^(HTTP|HTTPS|NO|ALL)_PROXY$') {
+    Fail "${source}: '$key' is reserved by the sandbox and can't be set this way"
+  }
+}
 if ($envFile) {
   $envFile = Resolve-HostPath $envFile
   if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) { Fail "env file not found: $envFile" }
@@ -367,13 +387,15 @@ if ($envFile) {
     $line = $line.TrimEnd("`r")
     if ($line -match '^\s*(#|$)') { continue }
     $key = $line.Split('=')[0]
-    if ($key -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*$') { Fail "${envFile}: invalid variable name '$key'" }
-    if ($key -cmatch '^(HOME|PATH|USER|SHELL|SUDO_.*|HOST_.*|AGENTCONTAINER_.*|LD_.*|GCONV_PATH|OPENSSL_.*|INSPECT|PROXY_LOGS|PROXY_LOG_DIR|ALLOW_CONTAINER|WITH_DOCKER)$' -or
-        $key -match '^(HTTP|HTTPS|NO|ALL)_PROXY$') {
-      Fail "${envFile}: '$key' is reserved by the sandbox and can't be set from an env file"
-    }
+    Test-EnvName $envFile $key
     $envKeys.Add($key)
   }
+}
+foreach ($kv in $cliEnvs) {
+  $key = $kv.Split('=')[0]
+  Test-EnvName '--env' $key
+  if ($kv.Contains("`n")) { Fail "--env: value of '$key' contains a newline" }
+  if (-not $envKeys.Contains($key)) { $envKeys.Add($key) }
 }
 $envKeysJoined = $envKeys -join ','
 
@@ -422,7 +444,7 @@ Usage: run.ps1 [--harness <name>] [--host-network] [--allow-list <path> | --allo
                [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
                [--no-bash-sandbox] [--env-file <path> | --no-env-file]
                 [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect]
-               [--sink <dir>] [--label <key=value>]...
+               [--sink <dir>] [--label <key=value>]... [--env <NAME=VALUE>]...
                [-h|--help] [harness-args... | command... | -- harness-args...]
 
 Windows/Docker Desktop version of run.sh - same flags, see run.sh --help or README.md
@@ -435,7 +457,8 @@ Anything else starting with '-' is forwarded to the harness itself (e.g. --conti
 A bare command (e.g. ``run.ps1 bash``) overrides the harness's default command
 ($defaultCommand). ``--`` ends run.ps1's own flags: everything after it goes to the
 harness verbatim, positional args included. ``--label K=V`` (repeatable) labels the
-container. In a git worktree the main repo's git dir is mounted read-write automatically.
+container; ``--env NAME=VALUE`` (repeatable) sets one variable (env-file name rules).
+--loopback-socket is Linux-only (run.sh). In a git worktree the main repo's git dir is mounted read-write automatically.
 
 Effective config on this machine:
   Harness:        $harnessDesc
@@ -639,9 +662,9 @@ if ($proxyLogs) {
 # is a path inside the VM, not on Windows, so it can't be Test-Path'ed here.
 if ($bashSandbox) { $dockerArgs.AddRange([string[]]@('-e', 'AGENTCONTAINER_BASH_SANDBOX=1')) }
 elseif ($sandboxedCommand) { $dockerArgs.AddRange([string[]]@('-e', 'AGENTCONTAINER_BASH_SANDBOX=0')) }
-if ($envFile) {
-  $dockerArgs.AddRange([string[]]@('--env-file', $envFile))
-  if ($envKeysJoined) { $dockerArgs.AddRange([string[]]@('-e', "AGENTCONTAINER_ENV_KEYS=$envKeysJoined")) }
+if ($envFile) { $dockerArgs.AddRange([string[]]@('--env-file', $envFile)) }
+foreach ($kv in $cliEnvs) { $dockerArgs.AddRange([string[]]@('-e', $kv)) }
+if ($envKeysJoined) { $dockerArgs.AddRange([string[]]@('-e', "AGENTCONTAINER_ENV_KEYS=$envKeysJoined")) }
 
 foreach ($m in @($EXTRA_MOUNTS)) { Add-MountSpec ([string]$m) 'config\run.local.ps1' }
 foreach ($m in $cliMounts) { Add-MountSpec $m '--mount' }

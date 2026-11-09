@@ -14,7 +14,7 @@ package manager. Everything is a shell script or config file consumed by
 
 - `build.sh`, `run.sh` (+ `build.ps1`, `run.ps1`, `setup.ps1` for Windows) - entry points.
 - `image/` - the harness-agnostic sandbox: `Dockerfile`, `entrypoint.sh`,
-  `inspect-proxy.py` (the mitmproxy egress addon), `allowed-domains.txt` (shared default
+  `inspect-proxy.py` (the mitmproxy egress addon), `loopback-forward.py` (`run.sh --loopback-socket`), `allowed-domains.txt` (shared default
   allowlist).
 - `harnesses/<name>/` - everything tool-specific: `install.sh` (build time),
   `harness.conf` (mounts + default command), `allowed-domains.txt`. Format documented
@@ -49,6 +49,8 @@ run.sh --mount ~/data                     # add an extra bind mount for one sess
 run.sh --mount ~/data:/data:ro            # ...or host:container[:ro] to mount elsewhere / read-only
 run.sh --ca-cert ~/corp-root-ca.crt       # import an extra root CA into the container trust store for one session (repeatable; CA_CERTS in run.local.sh = default) - e.g. a corporate root so --inspect can validate/intercept an internal host's chain
 run.sh --label fleet.session=abc         # docker label on the session container (repeatable, metadata only - Agent-Fleet finds its sessions by it)
+run.sh --env NAME=VALUE                  # one variable for this session (repeatable; env-file name rules)
+run.sh --loopback-socket 47823:/path.sock # 127.0.0.1:47823 in the container -> host Unix socket (image/loopback-forward.py; Linux only, not with --host-network)
 run.sh -- "fix the bug"                   # `--` ends run.sh's flags: the rest goes to the harness verbatim, positional args included (entrypoint.sh strips the `--`)
 run.sh --allow-container                  # mount the HOST's docker.sock in (no nested dockerd, no privileges - off by default, root-equivalent host access; excludes --with-docker/--sysbox)
 run.sh --with-docker                      # nested dockerd + privileges: sysbox-runc runtime if registered on the host, --privileged otherwise (off by default - no Docker at all otherwise)

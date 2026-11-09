@@ -44,6 +44,59 @@ for p in "$shared"/* "$shared"/.[!.]*; do
     [ -e "$home/$name" ] || ln -s "$p" "$home/$name"
 done
 
+# Optional per-session overlay (HERMES_SESSION_OVERLAY, e.g. from `run.sh --env` +
+# `--mount`): lets an orchestrator add plugins and config for one session without touching
+# the shared home (whose config is read-only in the sandbox anyway). Agent-Fleet uses it
+# for Orca's status plugin.
+#   <overlay>/plugins/<name>/  linked into the session's plugins dir, next to the shared
+#                              ones (an overlay plugin wins on a name clash)
+#   <overlay>/config.yaml      merged into a session copy of the shared config.yaml:
+#                              mappings recursively, lists by appending missing items,
+#                              anything else replaced. Comments in the shared file survive.
+overlay="${HERMES_SESSION_OVERLAY:-}"
+if [ -n "$overlay" ] && [ -d "$overlay" ]; then
+    if [ -d "$overlay/plugins" ]; then
+        [ -L "$home/plugins" ] && rm -f "$home/plugins"
+        mkdir -p "$home/plugins"
+        for p in "$shared/plugins"/* "$overlay/plugins"/*; do
+            [ -e "$p" ] || continue
+            ln -sfn "$p" "$home/plugins/${p##*/}"
+        done
+    fi
+    if [ -f "$overlay/config.yaml" ]; then
+        rm -f "$home/config.yaml"
+        # ruamel.yaml (round-trip, keeps comments) from the image's mitmproxy venv - Hermes'
+        # own YAML library lives in its per-session installs/, which isn't prepared yet.
+        /opt/mitmproxy/bin/python3 -I - "$shared/config.yaml" "$overlay/config.yaml" "$home/config.yaml" <<'PY'
+import os, sys
+from ruamel.yaml import YAML
+
+def merge(base, extra):
+    if isinstance(base, dict) and isinstance(extra, dict):
+        for k, v in extra.items():
+            base[k] = merge(base[k], v) if k in base else v
+        return base
+    if isinstance(base, list) and isinstance(extra, list):
+        base.extend(v for v in extra if v not in base)
+        return base
+    return extra
+
+shared, extra, out = sys.argv[1:4]
+yaml = YAML()
+base = None
+if os.path.isfile(shared):
+    with open(shared, encoding="utf-8") as f:
+        base = yaml.load(f)
+with open(extra, encoding="utf-8") as f:
+    add = yaml.load(f) or {}
+merged = merge(base if base is not None else {}, add)
+with open(out, "w", encoding="utf-8") as f:
+    yaml.dump(merged, f)
+os.chmod(out, 0o600)
+PY
+    fi
+fi
+
 HERMES_HOME="$home"
 export HERMES_HOME
 exec /opt/hermes/hermes-agent/.hermes/bin/hermes "$@"

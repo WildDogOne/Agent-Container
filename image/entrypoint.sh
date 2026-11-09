@@ -277,6 +277,26 @@ if [ -d /var/log/agentcontainer ]; then
     sh -c "tail -F '/tmp/agentcontainer/flows.jsonl' >> '/var/log/agentcontainer/flows.log'" >/dev/null 2>&1 &
 fi
 
+# run.sh --loopback-socket PORT:SOCKET: the host socket is mounted at
+# /run/agentcontainer/loopback/PORT.sock; forward 127.0.0.1:PORT to it, as dev (whose UID
+# is the host user's after the remap above, so a 0600 socket owned by that user works).
+# Ports were range-checked by run.sh; checked again here since they reach a command line.
+if [ -n "${AGENTCONTAINER_LOOPBACK_PORTS:-}" ]; then
+  if ! printf '%s' "$AGENTCONTAINER_LOOPBACK_PORTS" | grep -Eq '^[0-9]{4,5}(,[0-9]{4,5})*$'; then
+    echo "entrypoint.sh: invalid AGENTCONTAINER_LOOPBACK_PORTS: $AGENTCONTAINER_LOOPBACK_PORTS" >&2
+    exit 1
+  fi
+  for port in $(printf '%s' "$AGENTCONTAINER_LOOPBACK_PORTS" | tr ',' ' '); do
+    if [ -S "/run/agentcontainer/loopback/$port.sock" ]; then
+      (cd / && exec nohup setpriv --reuid=dev --regid=dev --init-groups env -i PATH=/usr/bin:/bin \
+        python3 /usr/local/lib/agentcontainer/loopback-forward.py "$port" "/run/agentcontainer/loopback/$port.sock" \
+        >/dev/null 2>&1) &
+    else
+      echo "entrypoint.sh: warning: --loopback-socket $port: no socket mounted, skipping" >&2
+    fi
+  done
+fi
+
 # run.sh --allow-container bind-mounts the HOST's own docker.sock at this same path,
 # so starting our own nested dockerd here would just fail to bind it. Instead, give dev
 # access to the mounted socket by joining the group that owns it on the host - dev's own

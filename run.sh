@@ -136,6 +136,19 @@
 # Likewise OPENSSL_CONF/OPENSSL_MODULES for the openssl/update-ca-certificates calls the
 # root phase makes for --ca-cert and --inspect (a config can load an engine/provider .so).
 #
+# `--env NAME=VALUE` (consumed here, not forwarded on; repeatable) sets one variable in the
+# session, with the same name rules as --env-file (the sandbox's own names are refused) -
+# for a caller such as Agent-Fleet that has a handful of per-session values and no file.
+#
+# `--loopback-socket PORT:SOCKET` (consumed here, not forwarded on; repeatable) makes
+# 127.0.0.1:PORT inside the container a byte-for-byte forward to the host Unix socket
+# SOCKET: the socket is bind-mounted at /run/agentcontainer/loopback/PORT.sock and
+# entrypoint.sh starts image/loopback-forward.py as dev, listening on the container's own
+# loopback. For tools that insist on reporting to a fixed loopback TCP port (Agent-Fleet
+# uses it for Orca's agent status hooks). No route out of the sandbox is added: whatever
+# listens on the socket decides what it accepts. Refused with --host-network, where the
+# listener would bind the host's loopback.
+#
 # `--sink <base>` (consumed here, not forwarded on; SINK_DIR in run.local.sh sets a
 # default base) records a finished session as a queryable result on the HOST instead of
 # letting it vanish with the container: <base>/<session>/record.json (git delta - commits,
@@ -171,6 +184,8 @@ cli_sink_dir=""     # --sink base dir ("" = not passed; SINK_DIR in run.local.sh
 cli_mounts=()
 cli_ca_certs=()  # --ca-cert host paths (CA files to import into the container trust store)
 cli_labels=()    # --label key=value docker labels (e.g. for an orchestrator to find its sessions)
+cli_envs=()      # --env NAME=VALUE (single variables, same name rules as an env file)
+cli_loopback=()  # --loopback-socket PORT:SOCKET (127.0.0.1:PORT in the container -> host Unix socket)
 args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -260,6 +275,25 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       cli_labels+=("$2")
+      shift 2
+      ;;
+    --env)
+      # One variable for this session, NAME=VALUE - the same name rules as --env-file
+      # (checked below), for a caller that has a few values and no file to put them in.
+      if [[ $# -lt 2 || "$2" != *=* ]]; then
+        echo "run.sh: --env requires a NAME=VALUE argument" >&2
+        exit 1
+      fi
+      cli_envs+=("$2")
+      shift 2
+      ;;
+    --loopback-socket)
+      # PORT:SOCKET - see the header comment. The socket path may not contain ':'.
+      if [[ $# -lt 2 || ! "$2" =~ ^[0-9]+:/[^:]+$ ]]; then
+        echo "run.sh: --loopback-socket requires a PORT:/absolute/socket/path argument" >&2
+        exit 1
+      fi
+      cli_loopback+=("$2")
       shift 2
       ;;
     --)
@@ -486,6 +520,20 @@ else
   env_file_desc="none ($default_env_file doesn't exist; pass --env-file or set ENV_FILE to use another file)"
 fi
 env_keys=""
+# Shared by --env-file and --env: names the sandbox relies on can't be set this way.
+check_env_name() {
+  local source="$1" key="$2"
+  if ! [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo "run.sh: $source: invalid variable name '$key'" >&2
+    exit 1
+  fi
+  case "$key" in
+    HOME|PATH|USER|SHELL|SUDO_*|HOST_*|AGENTCONTAINER_*|LD_*|GCONV_PATH|OPENSSL_*|INSPECT|PROXY_LOGS|PROXY_LOG_DIR|ALLOW_CONTAINER|WITH_DOCKER|[Hh][Tt][Tt][Pp]_[Pp][Rr][Oo][Xx][Yy]|[Hh][Tt][Tt][Pp][Ss]_[Pp][Rr][Oo][Xx][Yy]|[Nn][Oo]_[Pp][Rr][Oo][Xx][Yy]|[Aa][Ll][Ll]_[Pp][Rr][Oo][Xx][Yy])
+      echo "run.sh: $source: '$key' is reserved by the sandbox and can't be set this way" >&2
+      exit 1
+      ;;
+  esac
+}
 if [[ -n "$env_file" ]]; then
   if [[ ! -f "$env_file" ]]; then
     echo "run.sh: env file not found: $env_file" >&2
@@ -505,18 +553,43 @@ if [[ -n "$env_file" ]]; then
     line="${line%$'\r'}"
     [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
     key="${line%%=*}"
-    if ! [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-      echo "run.sh: $env_file: invalid variable name '$key'" >&2
-      exit 1
-    fi
-    case "$key" in
-      HOME|PATH|USER|SHELL|SUDO_*|HOST_*|AGENTCONTAINER_*|LD_*|GCONV_PATH|OPENSSL_*|INSPECT|PROXY_LOGS|PROXY_LOG_DIR|ALLOW_CONTAINER|WITH_DOCKER|[Hh][Tt][Tt][Pp]_[Pp][Rr][Oo][Xx][Yy]|[Hh][Tt][Tt][Pp][Ss]_[Pp][Rr][Oo][Xx][Yy]|[Nn][Oo]_[Pp][Rr][Oo][Xx][Yy]|[Aa][Ll][Ll]_[Pp][Rr][Oo][Xx][Yy])
-        echo "run.sh: $env_file: '$key' is reserved by the sandbox and can't be set from an env file" >&2
-        exit 1
-        ;;
-    esac
+    check_env_name "$env_file" "$key"
     env_keys="${env_keys:+$env_keys,}$key"
   done < "$env_file"
+fi
+# --env NAME=VALUE: passed with docker -e below; the names join env_keys so they survive
+# entrypoint.sh's drop to dev like an env file's.
+for kv in ${cli_envs[@]+"${cli_envs[@]}"}; do
+  check_env_name "--env" "${kv%%=*}"
+  if [[ "$kv" == *$'\n'* ]]; then
+    echo "run.sh: --env: value of '${kv%%=*}' contains a newline" >&2
+    exit 1
+  fi
+  [[ ",$env_keys," == *",${kv%%=*},"* ]] || env_keys="${env_keys:+$env_keys,}${kv%%=*}"
+done
+# --loopback-socket: the listener binds 127.0.0.1 in the container's own network
+# namespace - under --host-network that would be the host's loopback.
+loopback_ports=""
+for spec in ${cli_loopback[@]+"${cli_loopback[@]}"}; do
+  port="${spec%%:*}"
+  sock="${spec#*:}"
+  if [[ "$port" -lt 1024 || "$port" -gt 65535 ]]; then
+    echo "run.sh: --loopback-socket: port must be 1024-65535 (got $port)" >&2
+    exit 1
+  fi
+  if [[ ! -S "$sock" ]]; then
+    echo "run.sh: --loopback-socket: not a Unix socket: $sock" >&2
+    exit 1
+  fi
+  if [[ ",$loopback_ports," == *",$port,"* ]]; then
+    echo "run.sh: --loopback-socket: port $port given twice" >&2
+    exit 1
+  fi
+  loopback_ports="${loopback_ports:+$loopback_ports,}$port"
+done
+if [[ -n "$loopback_ports" && "$host_network" -eq 1 ]]; then
+  echo "run.sh: --loopback-socket and --host-network are mutually exclusive (the listener would bind the host's loopback)" >&2
+  exit 1
 fi
 
 # entrypoint.sh remaps dev's UID/GID (1000 in the image) to remap_uid/remap_gid, so files
@@ -559,7 +632,8 @@ Usage: run.sh [--harness <name>] [--host-network] [--allow-list <path> | --allow
               [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
               [--no-bash-sandbox] [--env-file <path> | --no-env-file]
               [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect] [--sink <dir>]
-              [--label <key=value>]...
+              [--label <key=value>]... [--env <NAME=VALUE>]...
+              [--loopback-socket <port:socket>]...
               [-h|--help] [harness-args... | command... | -- harness-args...]
 
 Launches a fresh, disposable sandbox container scoped to \$PWD. Only \$PWD and the
@@ -670,6 +744,13 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
   --label K=V       Put a docker label on the session container (metadata only, no effect
                     on the sandbox) - lets an orchestrator such as Agent-Fleet find its
                     sessions. Repeatable. Consumed here, never forwarded to the harness.
+  --env NAME=VALUE  Set one variable in the session (repeatable). Same name rules as
+                    --env-file: the sandbox's own names are refused.
+  --loopback-socket PORT:SOCKET
+                    Make 127.0.0.1:PORT inside the container a forward to the host Unix
+                    socket SOCKET (repeatable, port 1024-65535). For tools that report to
+                    a fixed loopback port (an orchestrator's status hooks); no new egress.
+                    Not with --host-network.
 
 Anything else starting with '-' is forwarded to the harness itself (e.g. --continue).
 A bare command (e.g. \`run.sh bash\`) overrides the harness's default command
@@ -960,9 +1041,21 @@ fi
 # only comments sets nothing, so there's nothing to keep either.
 if [[ -n "$env_file" ]]; then
   docker_args+=(--env-file "$env_file")
-  if [[ -n "$env_keys" ]]; then
-    docker_args+=(-e "AGENTCONTAINER_ENV_KEYS=$env_keys")
-  fi
+fi
+for kv in ${cli_envs[@]+"${cli_envs[@]}"}; do
+  docker_args+=(-e "$kv")
+done
+if [[ -n "$env_keys" ]]; then
+  docker_args+=(-e "AGENTCONTAINER_ENV_KEYS=$env_keys")
+fi
+
+# --loopback-socket: each socket is mounted at /run/agentcontainer/loopback/PORT.sock and
+# entrypoint.sh starts image/loopback-forward.py (as dev) listening on 127.0.0.1:PORT.
+for spec in ${cli_loopback[@]+"${cli_loopback[@]}"}; do
+  docker_args+=(-v "${spec#*:}:/run/agentcontainer/loopback/${spec%%:*}.sock")
+done
+if [[ -n "$loopback_ports" ]]; then
+  docker_args+=(-e "AGENTCONTAINER_LOOPBACK_PORTS=$loopback_ports")
 fi
 
 if [[ ${#EXTRA_MOUNTS[@]} -gt 0 ]]; then
