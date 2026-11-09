@@ -31,6 +31,9 @@ cd "$HOME\Agent-Container"
 image, since `~/.hermes` is mounted from the host at run time. The image is large
 because Hermes brings its own Python, Node and UI builds.
 
+If something else is in the way, `./doctor.py hermes` checks this machine - the daemon,
+the image, the `config/` files, your `~/.hermes` - and says what to fix.
+
 ## 2. Add a shortcut
 
 `run.sh` always works on the directory you start it from, so give it a short name you

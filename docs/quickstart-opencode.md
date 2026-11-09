@@ -32,6 +32,10 @@ V1 config (`~/.config/opencode/opencode.json`) keeps working as-is - OpenCode 2 
 the same locations and auto-migrates the terminal settings; only custom V1 plugins and
 server-API integrations need porting.
 
+If something else is in the way, `./doctor.py opencode` checks this machine - the
+daemon, the image, the `config/` files, your `~/.local/share/opencode` - and says what
+to fix.
+
 ## 2. Add a shortcut
 
 `run.sh` always works on the directory you start it from, so give it a short name you

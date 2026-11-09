@@ -90,6 +90,19 @@ Effective config on this machine:
     ...
 ```
 
+**Something in the way?** `./doctor.py` checks the machine the way `run.sh` reads it:
+does the daemon answer, is the image built and current, are the gitignored `config/`
+files in place, does `config/run.local.sh` parse, is the env file in the format docker
+wants, is `~/.claude.json` a file rather than a directory. Each finding names the file
+and the command that fixes it, and it exits non-zero only when something would actually
+stop a session.
+
+```sh
+~/Agent-Container/doctor.py               # the default harness (or: doctor.py hermes)
+~/Agent-Container/doctor.py --all         # every harness under harnesses/
+~/Agent-Container/doctor.py --fix         # also create what's missing (config files, state dirs)
+```
+
 ### Hermes Agent
 
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) works the same way, with
@@ -273,6 +286,7 @@ flowchart LR
 | Path | What's in it |
 |---|---|
 | `build.sh`, `run.sh` | What you run: build the images, start a session. |
+| `doctor.py` | Setup check: is this machine ready for a session, and what to fix if not. |
 | `build.ps1`, `run.ps1`, `setup.ps1` | The same for Windows, see [docs/windows.md](docs/windows.md). |
 | [`harnesses/`](harnesses/) | One folder per supported tool: how to install it, what to mount, which domains it needs. See [harnesses/README.md](harnesses/README.md). |
 | `image/` | The shared sandbox: `Dockerfile`, `entrypoint.sh`, the mitmproxy egress addon and the default allowlist. Nothing harness-specific. |
@@ -596,6 +610,12 @@ parents, and activates the first one it finds. Nothing creates the venv for you:
 
 ## Troubleshooting
 
+- **Where do I even start?** `./doctor.py` reads the same config `run.sh` reads and asks
+  docker what it knows, then lists what would stop a session and what's only worth
+  fixing: an unbuilt or stale image, a `config/run.local.sh` that doesn't source or has
+  a typo'd setting, an `EXTRA_MOUNTS` source that no longer exists, an env file with a
+  reserved name or loose permissions, allowlist entries that can never match,
+  `~/.claude.json` in the wrong shape. `--fix` creates what's missing.
 - **`env: 'remote-control': No such file or directory`** (or similar): a harness flag was passed
   without its leading dashes. `run.sh remote-control` is treated as a command to run
   instead of the harness. Use `run.sh --remote-control`.

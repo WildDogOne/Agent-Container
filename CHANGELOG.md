@@ -9,6 +9,23 @@ the change takes effect.
 
 ### Added
 
+- `doctor.py`: a setup check for the host, for the "why won't this start" case.
+  `./doctor.py [harness...]` (or `--all`) reads the same config `run.sh` reads -
+  `config/run.local.sh` (sourced the way `run.sh` sources it),
+  `harnesses/<name>/harness.conf`, the docker env file, the allowlists - and asks docker
+  what it knows (daemon reachable, image present and newer than its inputs, sysbox
+  registered, rootless/Podman affecting the UID remap). Findings are split into what
+  would stop a session (image not built, `ENV_FILE` pointing at a missing file,
+  `CONTAINER_UID=0`, a `CA_CERTS` entry that isn't a file, `~/.claude.json` being a
+  directory, an env file setting a reserved name like `HTTPS_PROXY`) and what is worth
+  fixing (a stale image, a typo'd setting in `run.local.sh`, an `EXTRA_MOUNTS` source
+  that no longer exists, `*.example.com` in an allowlist, a 644 env file, CRLF config
+  files), each with the command that fixes it. `--fix` does the safe repairs: seed
+  `config/allowed-domains.txt`/`config/extra-setup.sh` from their `.example`, create the
+  harness's state dirs and staged files, chmod 600 the env file, chmod +x the scripts.
+  `--quiet` shows only the problems, `--json` is for scripting. Exit code 0 unless
+  something blocks a session (`--strict`: also on warnings). Stdlib Python, host-side
+  only: it never starts a container and never writes without `--fix`. No rebuild.
 - `run.sh`/`run.ps1` run without a TTY when stdin or stdout isn't a terminal (`docker
   run -i` instead of `-it`). An SDK or ACP client driving the harness over pipes
   (`claude --output-format stream-json`, `opencode acp`, `claude -p` in a script) now

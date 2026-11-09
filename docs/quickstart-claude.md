@@ -30,6 +30,9 @@ cd "$HOME\Agent-Container"
 You don't need Claude Code installed on the host; `harnesses/claude/install.sh`
 installs it in the image with `npm install -g @anthropic-ai/claude-code`.
 
+If something else is in the way, `./doctor.py claude` checks this machine - the daemon,
+the image, the `config/` files, your `~/.claude` - and says what to fix.
+
 ## 2. Add a shortcut
 
 `run.sh` always works on the directory you start it from, so give it a short name you
