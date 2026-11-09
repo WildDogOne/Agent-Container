@@ -7,6 +7,15 @@ the change takes effect.
 
 ## Unreleased
 
+### Fixed
+
+- `image/entrypoint.sh` *(needs rebuild)*: directories Docker creates under `$HOME` as
+  parents of bind mounts (`~/.local`, `~/.local/state` from `--proxy-logs`, `~/.config`
+  from a `~/.config/...` mount, ...) are now chowned to `dev`, not just `$HOME` itself.
+  They stayed root-owned, so `uvx` couldn't create `~/.local/share/uv` and every
+  `uvx`-launched MCP server (e.g. `mcp-atlassian`) failed to start with "Permission denied"
+  whenever proxy logs were on.
+
 ### Added
 
 - `run.sh`/`run.ps1`: **`ALLOW_INTERNET=1`** in `config/run.local.sh`/`.ps1` makes

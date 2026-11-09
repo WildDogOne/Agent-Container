@@ -374,6 +374,23 @@ git config --system https.proxy "http://127.0.0.1:3128"
 export HOME="${HOST_HOME:-/home/dev}"
 mkdir -p "$HOME"
 chown dev:dev "$HOME"
+# The same goes for deeper scaffolding: a mount at e.g. ~/.local/state/agentcontainer/logs
+# (--proxy-logs) or ~/.config/x leaves ~/.local, ~/.local/state, ~/.config root-owned, so
+# dev can't create ~/.local/share (uvx's tool dir - uvx-launched MCP servers died with
+# "Permission denied") or ~/.config/<tool>. Walk up from every mount under $HOME and chown
+# each root-owned parent - but only where it lives in the container's own layer (its
+# containing mount is /), never a host directory inside another bind mount.
+findmnt -rn -o TARGET | while IFS= read -r target; do
+  case "$target" in "$HOME"/*) ;; *) continue ;; esac
+  dir=$(dirname "$target")
+  while [ "$dir" != "$HOME" ] && [ "$dir" != / ]; do
+    if [ -d "$dir" ] && [ "$(stat -c %u "$dir")" = 0 ] \
+        && [ "$(findmnt -n -o TARGET --target "$dir")" = / ]; then
+      chown dev:dev "$dir"
+    fi
+    dir=$(dirname "$dir")
+  done
+done
 
 # harness.conf `tmpfs`: run.sh mounts these $HOME-relative paths as container-local
 # tmpfs (writable in the session, never reaches the host - see run.sh). tmpfs mounts
