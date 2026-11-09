@@ -7,7 +7,20 @@ the change takes effect.
 
 ## Unreleased
 
-### Added
+### Changed
+
+- `claude-sandboxed` (Bash sandbox) *(needs rebuild)*: **read-write extra mounts are
+  writable from sandboxed shell commands.** `run.sh`/`run.ps1` pass the container paths
+  of the read-write `--mount`/`EXTRA_MOUNTS` entries as `AGENTCONTAINER_RW_MOUNTS`;
+  they become `sandbox.filesystem.allowWrite` and `permissions.additionalDirectories`.
+  Before, only `$PWD` was writable and rw mounts behaved read-only in Bash.
+- `claude-sandboxed` (Bash sandbox) *(needs rebuild)*: **`docker` works in sandboxed
+  shell commands with `--allow-container` or `--with-docker`/`--sysbox`.** The socket
+  paths are no longer denied, Unix sockets are allowed (`allowAllUnixSockets`) and
+  `~/.docker` is writable. Before, those flags were unusable from Bash with the default
+  sandbox on. Docker is root over the daemon's host, so these sessions are no longer
+  contained by the Bash sandbox - which those opt-in flags already implied. Without
+  them nothing changes.
 
 - `run.sh`/`run.ps1`: **git worktrees work inside the container.** When `$PWD/.git` is
   a file (a `git worktree`), the main repo's git dir (`git rev-parse --git-common-dir`)

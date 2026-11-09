@@ -100,7 +100,11 @@ Claude's `sandboxed_command` is `harnesses/claude/claude-sandboxed`: generates
 `--settings` per session (sandbox on, unsandboxed commands off, allowlist derived from
 `/etc/agentcontainer/allowed-hosts.txt`, denyRead on `.credentials.json` and `~/.claude.json` backups but not the file
 itself - MCP tokens go in the env file,
-env-file vars denied, Docker/containerd sockets denied) and probes bwrap with the same
+env-file vars denied, Docker/containerd sockets denied unless `AGENTCONTAINER_DOCKER`
+(set by `entrypoint.sh` for `--allow-container`/`--with-docker`; then
+`allowAllUnixSockets` + `~/.docker` writable), the rw extra mounts from
+`AGENTCONTAINER_RW_MOUNTS` (set by both run scripts) in `allowWrite` +
+`additionalDirectories`) and probes bwrap with the same
 namespaces/`/proc` mount Claude Code uses. Under sysbox a fresh `/proc` is refused and
 the `/proc` bind only passes with ipc/uts/cgroup namespaces too (sysbox's mount
 interception), and Claude Code's `apply-seccomp` helper mounts a fresh `/proc` itself, so

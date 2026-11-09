@@ -405,6 +405,14 @@ it runs. Every Bash command then runs in bubblewrap, inside the container:
 - **Secrets:** `~/.claude/.credentials.json` (the login token) and the backups of
   `~/.claude.json` (`~/.claude.json.*`, `~/.claude/backups/`) can't be read by shell commands, and Claude Code's file tools are denied them too.
   Variables from `--env-file` are removed from shell commands' environment.
+- **Files:** shell commands can write only in the project directory, temp dirs, and the
+  read-write `--mount`/`EXTRA_MOUNTS` paths of this session (`:ro` ones stay read-only).
+  Those paths are also added as working directories for Claude Code's file tools.
+- **Docker:** with `--allow-container` or `--with-docker`, shell commands can use the
+  Docker socket (Unix sockets allowed, socket paths not denied, `~/.docker` writable).
+  Without either flag, the socket paths are denied and Unix sockets are blocked. Docker
+  access is root over the daemon's host, so with these flags the Bash sandbox no longer
+  contains a command that sets out to escape - that is what the flags already mean.
 - **No way around it:** `allowUnsandboxedCommands` is off, so Claude can't rerun a
   failing command outside the sandbox. There's no `sudo` in the container at all.
 
@@ -426,8 +434,7 @@ namespaces, which Claude Code doesn't create. So in nested mode:
   missing namespaces. It only ever adds isolation, and does nothing outside nested mode;
 - Claude Code's seccomp filter for Unix sockets can't run (it needs a fresh `/proc`), so
   sockets are reachable by path. The nested Docker daemon's sockets are denied as files
-  instead, so `docker` doesn't work in sandboxed commands in either mode. Other sockets
-  do work in nested mode;
+  instead (unless Docker was asked for, see above). Other sockets do work in nested mode;
 - sandboxed commands may create user namespaces of their own. The sandbox's mounts are
   locked inside them: unmasking the denied files or remounting read-only paths writable
   is refused (tested);
@@ -504,6 +511,10 @@ of the sandbox, and they outlive it. **This is root-equivalent access to the hos
 `docker run -v /:/host ...` is enough to get a root shell there. Only use it for
 sessions that need to drive the host daemon, and only when you trust everything running
 inside. It can't be combined with `--with-docker`/`--sysbox`.
+
+With the [Bash sandbox](#bash-sandbox) on, either flag also lets sandboxed shell
+commands use the socket - otherwise `docker` would be unusable in exactly the sessions
+that asked for it.
 
 ## Customizing the image
 

@@ -292,7 +292,11 @@ if [ "${ALLOW_CONTAINER:-0}" = "1" ]; then
     groupadd -g "$sock_gid" "$sock_group"
   fi
   usermod -aG "$sock_group" dev
+  # Tells a harness Bash sandbox (claude-sandboxed) that the user deliberately handed
+  # this session a Docker socket, so sandboxed commands may use it - see preserve_env.
+  export AGENTCONTAINER_DOCKER=host
 elif [ "${WITH_DOCKER:-0}" = "1" ]; then
+  export AGENTCONTAINER_DOCKER=nested
   # run.sh --with-docker: nested Docker-in-Docker, explicitly requested (and run.sh
   # passed --privileged or selected the sysbox runtime for it). Without that flag there
   # is no daemon at all: the docker CLI in the container has no socket to talk to.
@@ -488,6 +492,10 @@ if [ -n "${AGENTCONTAINER_ENV_KEYS:-}" ]; then
   fi
   preserve_env="$preserve_env,$AGENTCONTAINER_ENV_KEYS,AGENTCONTAINER_ENV_KEYS"
 fi
+# What this session was deliberately given, for a harness Bash sandbox to honour: the
+# read-write extra mounts (run.sh) and the Docker socket (set above). Both are reserved
+# names, refused from an env file.
+preserve_env="$preserve_env,AGENTCONTAINER_RW_MOUNTS,AGENTCONTAINER_DOCKER"
 if [ "${INSPECT:-0}" = "1" ] || [ "$ca_imported" = "1" ]; then
   preserve_env="$preserve_env,NODE_EXTRA_CA_CERTS,CURL_CA_BUNDLE,REQUESTS_CA_BUNDLE,SSL_CERT_FILE"
 fi

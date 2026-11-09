@@ -90,7 +90,11 @@ function Add-MountSpec([string]$spec, [string]$origin) {
   $mode = $Matches['mode']
   if (-not $target) { $target = ConvertTo-ContainerPath $hostPath }
   Add-Bind $hostPath $target -ReadOnly:($mode -eq 'ro')
+  # See run.sh: read-write targets are passed on as AGENTCONTAINER_RW_MOUNTS so a harness
+  # Bash sandbox (claude-sandboxed) can allow writes there too.
+  if ($mode -ne 'ro') { $script:rwMounts.Add($target) }
 }
+$rwMounts = New-Object System.Collections.Generic.List[string]
 
 $cliHarness = ''
 $hostNetwork = $false
@@ -625,6 +629,9 @@ if ($envFile) {
 
 foreach ($m in @($EXTRA_MOUNTS)) { Add-MountSpec ([string]$m) 'config\run.local.ps1' }
 foreach ($m in $cliMounts) { Add-MountSpec $m '--mount' }
+if ($rwMounts.Count -gt 0) {
+  $dockerArgs.AddRange([string[]]@('-e', ('AGENTCONTAINER_RW_MOUNTS=' + ($rwMounts -join ':'))))
+}
 
 # --ca-cert / CA_CERTS: bind each CA file read-only under /etc/agentcontainer/ca-certs/;
 # entrypoint.sh imports them into the container's trust store at start (see run.sh).

@@ -77,6 +77,34 @@ domains=$(sed -E 's/\r$//; s/#.*//; s/[[:space:]]//g; s/^\[([^]]*)\](:[0-9]+)?$/
   | grep -v '^$' | sort -u \
   | jq -R -s 'split("\n") | map(select(length > 0)) | map(if startswith(".") then (.[1:], "*" + .) else . end) | unique')
 
+# What the user deliberately handed this session (set by run.sh/entrypoint.sh, reserved
+# names an env file can't set):
+# - AGENTCONTAINER_RW_MOUNTS: container paths of the read-write --mount/EXTRA_MOUNTS
+#   entries, ':'-separated. Sandboxed commands may only write in $PWD otherwise; these
+#   go to allowWrite (and additionalDirectories, so the file tools work there without
+#   prompts too).
+# - AGENTCONTAINER_DOCKER=host|nested: --allow-container / --with-docker. Then sandboxed
+#   commands may use the Docker socket: the socket paths aren't denied, Unix sockets are
+#   allowed (allowAllUnixSockets, which also skips the seccomp helper - not the per-path
+#   allowUnixSockets: seccomp can't filter connect() by path, so on Linux that list
+#   isn't something to rely on) and ~/.docker (container-local,
+#   the CLI's config/buildx state) is writable. A Docker socket is root over whatever
+#   runs the daemon, so with it the Bash sandbox no longer contains a determined command
+#   - which is what those flags already mean, and why they're opt-in.
+rw_mounts=$(printf '%s' "${AGENTCONTAINER_RW_MOUNTS:-}" \
+  | jq -R -s 'split(":") | map(select(startswith("/"))) | unique')
+docker=false
+case "${AGENTCONTAINER_DOCKER:-}" in
+  host|nested)
+    docker=true
+    mkdir -p "$HOME/.docker"
+    echo "claude-sandboxed: Docker socket allowed in sandboxed commands (${AGENTCONTAINER_DOCKER} daemon)" >&2
+    ;;
+esac
+if [ "$rw_mounts" != "[]" ]; then
+  echo "claude-sandboxed: sandboxed commands may also write to: $(printf '%s' "$rw_mounts" | jq -r 'join(" ")')" >&2
+fi
+
 # Variables from run.sh --env-file (validated there and in entrypoint.sh): meant for MCP
 # servers, which Claude Code starts outside the sandbox, so Bash doesn't need them.
 env_vars=$(printf '%s' "${AGENTCONTAINER_ENV_KEYS:-}" \
@@ -86,6 +114,8 @@ jq -n \
   --argjson domains "$domains" \
   --argjson env_vars "$env_vars" \
   --argjson nested "$nested" \
+  --argjson docker "$docker" \
+  --argjson rw_mounts "$rw_mounts" \
   --arg settings_dir "$settings_dir" \
   '{
     sandbox: ({
@@ -93,20 +123,23 @@ jq -n \
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       enableWeakerNestedSandbox: $nested,
-      filesystem: {
-        # The Docker/containerd sockets too, in both modes: root on the nested dockerd
-        # means a container with all files of this one mounted and its own network.
-        # Seccomp already blocks Unix sockets in normal mode; this also covers nested.
+      filesystem: ({
+        # The Docker/containerd sockets too, in both modes, unless the session was
+        # given Docker on purpose (see above): root on the nested dockerd means a
+        # container with all files of this one mounted and its own network. Seccomp
+        # already blocks Unix sockets in normal mode; this also covers nested.
         # ~/.claude.json itself stays readable (MCP tokens belong in the env file, as
         # ${VAR}), but its backups (~/.claude.json.*, ~/.claude/backups) can predate that.
-        denyRead: ["~/.claude.json.*", "~/.claude/.credentials.json",
-                   "~/.claude/backups",
-                   "/run/docker.sock", "/run/docker", "/run/containerd"],
+        denyRead: (["~/.claude.json.*", "~/.claude/.credentials.json",
+                    "~/.claude/backups"]
+                   + (if $docker then [] else ["/run/docker.sock", "/run/docker", "/run/containerd"] end)),
         denyWrite: [$settings_dir]
-      },
-      network: ({ allowedDomains: $domains } + (if $nested then { allowAllUnixSockets: true } else {} end))
+      } + (if ($rw_mounts | length) > 0 or $docker
+           then { allowWrite: ($rw_mounts + (if $docker then ["~/.docker"] else [] end)) }
+           else {} end)),
+      network: ({ allowedDomains: $domains } + (if $nested or $docker then { allowAllUnixSockets: true } else {} end))
     } + (if ($env_vars | length) > 0 then { credentials: { envVars: $env_vars } } else {} end)),
-    permissions: {
+    permissions: ((if ($rw_mounts | length) > 0 then { additionalDirectories: $rw_mounts } else {} end) + {
       deny: [
         "Read(~/.claude.json.*)",
         "Read(~/.claude/.credentials.json)",
@@ -125,7 +158,7 @@ jq -n \
         "Edit(./.claude/settings.local.json)",
         "Edit(./.mcp.json)"
       ]
-    }
+    })
   }' > "$settings"
 chmod 444 "$settings"
 

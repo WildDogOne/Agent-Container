@@ -937,6 +937,21 @@ if [[ ${#cli_mounts[@]} -gt 0 ]]; then
   done
 fi
 
+# The container-side paths of the read-write ones among them (no "ro" in the options
+# field), ':'-separated - docker -v specs can't contain ':' in a path anyway. A harness
+# Bash sandbox (claude-sandboxed) only allows writes in $PWD by default and adds these,
+# so a mount the user gave read-write is writable from sandboxed commands too.
+rw_mounts=""
+for mount in ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} ${cli_mounts[@]+"${cli_mounts[@]}"}; do
+  IFS=: read -r m_src m_dst m_opts <<< "$mount"
+  [[ -z "$m_dst" ]] && m_dst="$m_src"
+  [[ ",$m_opts," == *,ro,* || "$m_dst" != /* ]] && continue
+  rw_mounts="${rw_mounts:+$rw_mounts:}$m_dst"
+done
+if [[ -n "$rw_mounts" ]]; then
+  docker_args+=(-e "AGENTCONTAINER_RW_MOUNTS=$rw_mounts")
+fi
+
 # --ca-cert / CA_CERTS: bind each CA file read-only under /etc/agentcontainer/ca-certs/;
 # entrypoint.sh imports them into the container's trust store at start. Validate they're
 # existing files first - Docker would otherwise mkdir the missing path at the target.
