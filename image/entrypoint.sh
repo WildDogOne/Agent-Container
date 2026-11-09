@@ -449,6 +449,11 @@ fi
 
 if [ "$#" -eq 0 ]; then
   set -- zsh -lc "exec $harness_command"
+elif [ "$1" = "--" ]; then
+  # `run.sh -- args...`: everything after `--` belongs to the harness, positional args
+  # included (e.g. a prompt), so it is never taken as a command override.
+  shift
+  set -- zsh -lc "exec $harness_command \"\$@\"" zsh "$@"
 elif [ "${1#-}" != "$1" ]; then
   # First arg is a flag (e.g. --continue, --resume) rather than a full command
   # override - forward it to the harness instead of trying to exec a flag as a program.

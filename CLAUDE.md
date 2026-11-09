@@ -48,6 +48,8 @@ run.sh --env-file ~/other.env             # pass a docker env file in (e.g. MCP 
 run.sh --mount ~/data                     # add an extra bind mount for one session, rw same path both sides (repeatable)
 run.sh --mount ~/data:/data:ro            # ...or host:container[:ro] to mount elsewhere / read-only
 run.sh --ca-cert ~/corp-root-ca.crt       # import an extra root CA into the container trust store for one session (repeatable; CA_CERTS in run.local.sh = default) - e.g. a corporate root so --inspect can validate/intercept an internal host's chain
+run.sh --label fleet.session=abc         # docker label on the session container (repeatable, metadata only - Agent-Fleet finds its sessions by it)
+run.sh -- "fix the bug"                   # `--` ends run.sh's flags: the rest goes to the harness verbatim, positional args included (entrypoint.sh strips the `--`)
 run.sh --allow-container                  # mount the HOST's docker.sock in (no nested dockerd, no privileges - off by default, root-equivalent host access; excludes --with-docker/--sysbox)
 run.sh --with-docker                      # nested dockerd + privileges: sysbox-runc runtime if registered on the host, --privileged otherwise (off by default - no Docker at all otherwise)
 run.sh --sysbox                           # implies --with-docker and forces the sysbox-runc runtime (must be installed/registered on the host already)
@@ -119,7 +121,11 @@ whole-home mount, no persistent container. `config/run.local.sh` (gitignored) is
 for optional per-machine `EXTRA_MOUNTS`, `CA_CERTS`, `HARNESS`, `CONTAINER_UID`/`CONTAINER_GID` -
 opt-in only, widen deliberately. `run.sh --mount <path>` (repeatable) adds
 session-scoped extra mounts the same way. A bare path with no `:` mounts read-write at
-the same path on both sides; use `host:container[:ro]` to differ. `run.sh --ca-cert <path>`
+the same path on both sides; use `host:container[:ro]` to differ. When `$PWD/.git` is a file (a git worktree), `run.sh`/`run.ps1` also mount the main
+repo's git dir (`git rev-parse --git-common-dir`) read-write at its own path - but only
+if git's back-link `<common>/worktrees/<name>/gitdir` points at this `$PWD/.git`, because
+both forward pointers are writable by an earlier session and could otherwise redirect
+the mount to `$HOME`. `run.sh --ca-cert <path>`
 (repeatable, or `CA_CERTS` in `run.local.sh`) bind-mounts extra root CA files ro under
 `/etc/agentcontainer/ca-certs/`; `entrypoint.sh` imports them into the container's trust
 store (`update-ca-certificates`) at start - chiefly so `--inspect` lets mitmproxy

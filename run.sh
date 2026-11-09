@@ -157,6 +157,7 @@ cli_proxy_log_dir=""
 cli_inspect=""      # "" = not passed, "1" = --inspect
 cli_mounts=()
 cli_ca_certs=()  # --ca-cert host paths (CA files to import into the container trust store)
+cli_labels=()    # --label key=value docker labels (e.g. for an orchestrator to find its sessions)
 args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -227,6 +228,26 @@ while [[ $# -gt 0 ]]; do
         cli_mounts+=("$2:$2")
       fi
       shift 2
+      ;;
+    --label)
+      # Docker label on the session container - metadata only (no effect on the
+      # sandbox), so an orchestrator like Agent-Fleet can find its sessions with
+      # `docker ps --filter label=...`. key=value, key in docker's charset.
+      if [[ $# -lt 2 || ! "$2" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*=.*$ ]]; then
+        echo "run.sh: --label requires a key=value argument" >&2
+        exit 1
+      fi
+      cli_labels+=("$2")
+      shift 2
+      ;;
+    --)
+      # End of run.sh's own flags: everything after it goes to the harness verbatim
+      # (kept with its `--`, which entrypoint.sh strips), even args that look like
+      # run.sh flags or don't start with `-` - e.g. a positional prompt that would
+      # otherwise replace the harness command. Lets a caller (Agent-Fleet's launcher)
+      # forward untrusted harness args without them ever being read as sandbox flags.
+      args+=("$@")
+      break
       ;;
     --ca-cert)
       if [[ $# -lt 2 ]]; then
@@ -507,7 +528,8 @@ Usage: run.sh [--harness <name>] [--host-network] [--allow-list <path> | --allow
               [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
               [--no-bash-sandbox] [--env-file <path> | --no-env-file]
               [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect]
-              [-h|--help] [harness-args... | command...]
+              [--label <key=value>]...
+              [-h|--help] [harness-args... | command... | -- harness-args...]
 
 Launches a fresh, disposable sandbox container scoped to \$PWD. Only \$PWD and the
 harness's login/state are mounted in; the container is removed on exit (--rm).
@@ -604,10 +626,16 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     call and breaks TLS pinning - opt-in; HTTPS is tunneled undecrypted by
                     default. INSPECT=1 in run.local.sh makes it the default. Consumed here,
                     never forwarded to docker/the harness.
+  --label K=V       Put a docker label on the session container (metadata only, no effect
+                    on the sandbox) - lets an orchestrator such as Agent-Fleet find its
+                    sessions. Repeatable. Consumed here, never forwarded to the harness.
 
 Anything else starting with '-' is forwarded to the harness itself (e.g. --continue).
 A bare command (e.g. \`run.sh bash\`) overrides the harness's default command
-($(harness_conf command)) entirely. Full details: README.md.
+($(harness_conf command)) entirely. \`--\` ends run.sh's own flags: everything after it
+goes to the harness verbatim, positional args included (\`run.sh -- "fix the bug"\`).
+In a git worktree (.git is a file) the main repo's git dir is mounted read-write
+automatically, so git works inside the container. Full details: README.md.
 
 Effective config on this machine:
   Harness:        $harness$([[ -n "$cli_harness" ]] && echo " (--harness passed)")
@@ -714,6 +742,41 @@ docker_args=(
   -w "$PWD"
   -e "HOST_HOME=$HOME"
 )
+
+# Git worktree: $PWD/.git is a file pointing into <main-repo>/.git/worktrees/<name>, outside
+# $PWD, so git inside the container would find no repository. Mount the common git dir
+# (objects, refs, the worktree's own metadata) read-write at its own path. Read-write is
+# required - commits write objects and refs there - so the session can also change the
+# main checkout's refs and anything else in its .git (hooks/config included, the same
+# exposure a plain repo's $PWD/.git already has).
+# Both pointers git follows here ($PWD/.git and <gitdir>/commondir) are writable by an
+# earlier session, so neither is trusted on its own: the mount happens only when git's own
+# back-link agrees - <common>/worktrees/<name>/gitdir must point at this $PWD/.git. A
+# session can't forge that for a directory it has no write access to, so it can't
+# redirect the next session's mount to $HOME or another repo's git dir.
+if [[ -f "$PWD/.git" ]] && command -v git >/dev/null 2>&1; then
+  wt_git_dir="$(git -C "$PWD" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  git_common_dir="$(git -C "$PWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  if [[ -n "$wt_git_dir" && -n "$git_common_dir" ]]; then
+    wt_git_dir="$(realpath -e "$wt_git_dir" 2>/dev/null || true)"
+    git_common_dir="$(realpath -e "$git_common_dir" 2>/dev/null || true)"
+    back_link="$(realpath -m "$(cat "$wt_git_dir/gitdir" 2>/dev/null || true)" 2>/dev/null || true)"
+    if [[ -n "$wt_git_dir" && -n "$git_common_dir" \
+          && "$(dirname "$wt_git_dir")" == "$git_common_dir/worktrees" \
+          && "$back_link" == "$(realpath -e "$PWD/.git")" \
+          && -f "$git_common_dir/HEAD" && -d "$git_common_dir/objects" && -d "$git_common_dir/refs" \
+          && "$git_common_dir" != "$PWD"/* \
+          && "$HOME/" != "$git_common_dir"/* ]]; then
+      docker_args+=(-v "$git_common_dir:$git_common_dir")
+    else
+      echo "run.sh: warning: $PWD is a git worktree, but its git dir links don't check out - not mounting the main repo's git dir (git won't work in the container)" >&2
+    fi
+  fi
+fi
+
+for label in ${cli_labels[@]+"${cli_labels[@]}"}; do
+  docker_args+=(--label "$label")
+done
 for entry in ${harness_state[@]+"${harness_state[@]}"}; do
   docker_args+=(-v "$HOME/$entry:$HOME/$entry")
 done

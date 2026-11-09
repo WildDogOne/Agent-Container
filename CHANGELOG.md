@@ -7,6 +7,25 @@ the change takes effect.
 
 ## Unreleased
 
+### Added
+
+- `run.sh`/`run.ps1`: **git worktrees work inside the container.** When `$PWD/.git` is
+  a file (a `git worktree`), the main repo's git dir (`git rev-parse --git-common-dir`)
+  is mounted read-write at its own path; before, git inside the container found no
+  repository. Read-write is required (commits write objects and refs), so a session in
+  a worktree can also change the main repo's refs and `.git` (hooks, config - the same
+  exposure a plain repo's `$PWD/.git` has); the main working tree stays unmounted. The
+  mount happens only when git's back-link (`<common>/worktrees/<name>/gitdir`) points at
+  this worktree's `.git`: the `.git` file and `commondir` are writable by an earlier
+  session and could otherwise point the next session's mount at `$HOME`. No rebuild.
+- `run.sh`/`run.ps1` **`--`**: ends the run script's own flags; everything after it is
+  forwarded to the harness verbatim, including positional args (`run.sh -- "fix the
+  bug"`) that would otherwise replace the harness command, and args that look like run
+  script flags. **rebuild** (`image/entrypoint.sh` strips the `--`).
+- `run.sh`/`run.ps1` **`--label key=value`** (repeatable): docker label on the session
+  container, metadata only - lets an orchestrator (Agent-Fleet) find its sessions with
+  `docker ps --filter label=...`. No rebuild.
+
 ### Fixed
 
 - `image/entrypoint.sh` *(needs rebuild)*: directories Docker creates under `$HOME` as

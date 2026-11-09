@@ -110,6 +110,7 @@ $cliProxyLogDir = ''
 $cliInspect = ''     # '' = not passed, '1' = --inspect
 $cliMounts = New-Object System.Collections.Generic.List[string]
 $cliCaCerts = New-Object System.Collections.Generic.List[string]
+$cliLabels = New-Object System.Collections.Generic.List[string]
 $forward = New-Object System.Collections.Generic.List[string]
 
 $i = 0
@@ -160,6 +161,19 @@ while ($i -lt $cliArgs.Count) {
     '--ca-cert' {
       if ($i + 1 -ge $cliArgs.Count) { Fail '--ca-cert requires a host path to a CA certificate file' }
       $cliCaCerts.Add([string]$cliArgs[$i + 1]); $i += 2; continue
+    }
+    '--label' {
+      # Docker label on the session container (metadata only) - see run.sh.
+      if ($i + 1 -ge $cliArgs.Count -or -not ([string]$cliArgs[$i + 1] -cmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*=')) {
+        Fail '--label requires a key=value argument'
+      }
+      $cliLabels.Add([string]$cliArgs[$i + 1]); $i += 2; continue
+    }
+    '--' {
+      # End of run.ps1's own flags: the rest goes to the harness verbatim, with its
+      # leading `--` (entrypoint.sh strips it) - see run.sh.
+      for ($j = $i; $j -lt $cliArgs.Count; $j++) { $forward.Add([string]$cliArgs[$j]) }
+      $i = $cliArgs.Count; break
     }
     default { $forward.Add($a); $i++ }
   }
@@ -388,7 +402,8 @@ Usage: run.ps1 [--harness <name>] [--host-network] [--allow-list <path> | --allo
                [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
                [--no-bash-sandbox] [--env-file <path> | --no-env-file]
                 [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect]
-               [-h|--help] [harness-args... | command...]
+               [--label <key=value>]...
+               [-h|--help] [harness-args... | command... | -- harness-args...]
 
 Windows/Docker Desktop version of run.sh - same flags, see run.sh --help or README.md
 for what each one does. --sysbox is rejected here (sysbox-runc can't run in Docker
@@ -398,7 +413,9 @@ Available harnesses: $available
 
 Anything else starting with '-' is forwarded to the harness itself (e.g. --continue).
 A bare command (e.g. ``run.ps1 bash``) overrides the harness's default command
-($defaultCommand).
+($defaultCommand). ``--`` ends run.ps1's own flags: everything after it goes to the
+harness verbatim, positional args included. ``--label K=V`` (repeatable) labels the
+container. In a git worktree the main repo's git dir is mounted read-write automatically.
 
 Effective config on this machine:
   Harness:        $harnessDesc
@@ -491,6 +508,37 @@ $dockerArgs = New-Object System.Collections.Generic.List[string]
 # --init: docker-init is PID 1, not the harness (see run.sh).
 $dockerArgs.AddRange([string[]]@('--rm', '-it', '--init', '-w', $projectTarget, '-e', "HOST_HOME=$homeTarget"))
 Add-Bind $projectDir $projectTarget
+
+# Git worktree: mount the main repo's git dir read-write so git works inside the
+# container - only when git's back-link (<common>/worktrees/<name>/gitdir) points at this
+# worktree's .git, since an earlier session can rewrite the forward pointers (see run.sh).
+if (Test-Path -LiteralPath (Join-Path $projectDir '.git') -PathType Leaf) {
+  $wtGitDir = Invoke-NativeCapture git.exe @('-C', $projectDir, 'rev-parse', '--absolute-git-dir')
+  $gitCommonDir = Invoke-NativeCapture git.exe @('-C', $projectDir, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+  $linksOk = $false
+  if ($wtGitDir -and $gitCommonDir) {
+    $wtGitDir = [IO.Path]::GetFullPath(($wtGitDir -replace '/', '\'))
+    $gitCommonDir = [IO.Path]::GetFullPath(($gitCommonDir -replace '/', '\'))
+    $backLinkFile = Join-Path $wtGitDir 'gitdir'
+    if (Test-Path -LiteralPath $backLinkFile -PathType Leaf) {
+      $backLink = [IO.Path]::GetFullPath(((Get-Content -LiteralPath $backLinkFile -TotalCount 1).Trim() -replace '/', '\'))
+      $ownGit = [IO.Path]::GetFullPath((Join-Path $projectDir '.git'))
+      $homeDir = [IO.Path]::GetFullPath($hostHome).TrimEnd('\') + '\'
+      $linksOk = ((Split-Path -Parent $wtGitDir) -ieq (Join-Path $gitCommonDir 'worktrees')) -and
+        ($backLink -ieq $ownGit) -and
+        (Test-Path -LiteralPath (Join-Path $gitCommonDir 'HEAD') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $gitCommonDir 'objects') -PathType Container) -and
+        (-not $gitCommonDir.StartsWith($projectDir + '\', [StringComparison]::OrdinalIgnoreCase)) -and
+        (-not $homeDir.StartsWith($gitCommonDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase))
+    }
+  }
+  if ($linksOk) {
+    Add-Bind $gitCommonDir (ConvertTo-ContainerPath $gitCommonDir)
+  } else {
+    [Console]::Error.WriteLine("run.ps1: warning: $projectDir is a git worktree, but its git dir links don't check out - not mounting the main repo's git dir")
+  }
+}
+foreach ($l in $cliLabels) { $dockerArgs.AddRange([string[]]@('--label', $l)) }
 foreach ($entry in $harnessState) { Add-Bind (Get-HostHomePath $entry) "$homeTarget/$entry" }
 # See run.sh: harness.conf `tmpfs` paths are container-local tmpfs mounts covering a
 # path inside a state mount (writable in the session, discarded on exit). entrypoint.sh
