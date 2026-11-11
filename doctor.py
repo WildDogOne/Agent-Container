@@ -10,6 +10,8 @@
     ./doctor.py --quiet         only the problems (no ok lines)
     ./doctor.py --json          machine-readable report (a CI job, or another tool)
 
+    On Windows the same flags, run as `python .\\doctor.py` (docs/windows.md).
+
 Everything `run.sh` needs has to be in the right place *before* it starts: the image
 built, the gitignored config files present, `config/run.local.sh` valid, the docker env
 file free of the names the sandbox reserves, the harness's `state`/`staged` paths under
@@ -19,11 +21,16 @@ run.sh reads - config/run.local.sh, harnesses/<name>/harness.conf, the env file,
 allowlists - and asks docker what it knows (daemon reachable, image present, sysbox
 registered). It never starts a container, and it writes nothing unless --fix is passed.
 
+On a Windows host it checks the Windows side of the same things: config/run.local.ps1
+instead of run.local.sh, run.ps1's mount rules (a drive letter's colon is fine there -
+run.ps1 uses `docker run --mount`, not -v), and Docker Desktop's Linux engine.
+
 Exit code 0 when nothing would stop a session, 1 when something would (--strict makes
 warnings count too). Stdlib only, like the other host-side tools in tools/.
 """
 
 import argparse
+import base64
 import fnmatch
 import ipaddress
 import json
@@ -38,6 +45,13 @@ from datetime import datetime, timezone
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HOME = os.path.expanduser("~")
 DEFAULT_ENV_FILE = os.path.join(HOME, ".config", "agentcontainer.env")
+
+IS_WINDOWS = platform.system() == "Windows"
+# The two hosts read different files and mount differently (docs/windows.md), so the
+# findings and the hints have to quote the entry point this machine actually uses.
+RUN_SCRIPT = "run.ps1" if IS_WINDOWS else "run.sh"
+BUILD_CMD = r".\build.ps1" if IS_WINDOWS else "./build.sh"
+LOCAL_CONFIG = os.path.join("config", "run.local.ps1" if IS_WINDOWS else "run.local.sh")
 
 # harnesses/README.md: the keys run.sh/entrypoint.sh read. Anything else in a
 # harness.conf is a typo, and run.sh just ignores it.
@@ -241,11 +255,16 @@ def check_harness_conf(report, section, name):
 
     conf = read_harness_conf(conf_path)
     rel = os.path.relpath(conf_path, ROOT)
-    warn_crlf(report, section, conf_path,
-              "run.sh reads it as-is (the build strips \\r inside the image), so a CRLF file breaks the command and mounts")
+    if not IS_WINDOWS:
+        warn_crlf(report, section, conf_path,
+                  "run.sh reads it as-is (the build strips \\r inside the image), so a CRLF file breaks the "
+                  "command and mounts")
+    # On Windows this is deliberately not a finding: run.ps1 reads it with
+    # [IO.File]::ReadAllLines, which drops the \r, and the Dockerfile strips \r from
+    # everything it copies into the image (docs/windows.md: Line endings).
     for key in sorted(conf):
         if key not in HARNESS_KEYS:
-            report.warn(section, "%s: unknown key '%s' - run.sh and entrypoint.sh ignore it" % (rel, key),
+            report.warn(section, "%s: unknown key '%s' - %s and entrypoint.sh ignore it" % (rel, key, RUN_SCRIPT),
                         hint="harnesses/README.md lists the keys: %s" % " ".join(HARNESS_KEYS))
     for key in sorted(conf):
         entries = conf[key]
@@ -269,8 +288,9 @@ def check_harness_conf(report, section, name):
     for key in ("state", "config", "staged", "tmpfs"):
         raw = conf_value(conf, key)
         if '"' in raw or "'" in raw:
-            report.warn(section, "%s: '%s' has a quote in it - run.sh splits the value on spaces, quoting doesn't help"
-                        % (rel, key), hint="paths in harness.conf can't contain spaces - see harnesses/README.md")
+            report.warn(section, "%s: '%s' has a quote in it - %s splits the value on spaces, quoting doesn't help"
+                        % (rel, key, RUN_SCRIPT),
+                        hint="paths in harness.conf can't contain spaces - see harnesses/README.md")
         for entry in conf_list(conf, key):
             if entry.startswith("/"):
                 report.warn(section, "%s: '%s' path '%s' should be relative to $HOME" % (rel, key, entry))
@@ -287,7 +307,7 @@ def check_harness_conf(report, section, name):
         if os.path.isfile(path):
             report.ok(section, "%s exists" % os.path.relpath(path, ROOT))
         else:
-            report.fail(section, "%s is missing - ./build.sh %s would fail" % (os.path.relpath(path, ROOT), name),
+            report.fail(section, "%s is missing - %s %s would fail" % (os.path.relpath(path, ROOT), BUILD_CMD, name),
                         hint="see harnesses/README.md")
     return conf
 
@@ -360,7 +380,7 @@ def check_allowlist(report, section, path, assembled):
     if entries == 0 and rel == os.path.join("config", "allowed-domains.txt"):
         report.note(section, "%s has no entries of its own - a session gets only the shared defaults "
                     "and the harness's own domains" % rel,
-                    hint="add the hosts your MCP servers or model endpoints need (one per line), then ./build.sh")
+                    hint="add the hosts your MCP servers or model endpoints need (one per line), then %s" % BUILD_CMD)
         return
     report.ok(section, "%s: %d entr%s %s" % (rel, entries, "y" if entries == 1 else "ies", label))
 
@@ -374,26 +394,30 @@ def check_host(report, fix):
         report.ok(section, "Linux %s" % (platform.release() or ""))
     elif system == "Windows":
         report.note(section, "Windows: the supported entry points are setup.ps1, build.ps1 and run.ps1",
-                    hint="this script reads the Linux config files (config/run.local.sh), so its answers "
-                         "here are only partly meaningful on Windows")
+                    hint="the checks below read what %s reads: %s, harnesses/<name>/harness.conf, the env "
+                         "file and Docker Desktop's engine; only the sysbox note is Linux-only"
+                         % (RUN_SCRIPT, LOCAL_CONFIG))
     else:
         report.warn(section, "%s isn't a supported host - the image is Ubuntu 24.04 and run.sh is written for Linux" % system,
                     hint="see README.md Requirements")
 
-    if not shutil.which("bash"):
+    if not IS_WINDOWS and not shutil.which("bash"):
         report.fail(section, "bash is not on PATH - run.sh is a bash script")
     if not shutil.which("git"):
         report.warn(section, "git is not on PATH - the worktree mount and --sink can't work",
                     hint="git inside the container comes from the image; this is only about run.sh's own git calls")
     if current_uid() == 0:
         report.note(section, "running as root: dev keeps UID 1000:1000, so files the session writes land owned by 1000",
-                    hint="run the session as your own user, or set CONTAINER_UID in config/run.local.sh")
+                    hint="run the session as your own user, or set CONTAINER_UID in %s" % LOCAL_CONFIG)
 
-    for script in ("run.sh", "build.sh", "doctor.py"):
+    for script in (("run.ps1", "build.ps1", "setup.ps1", "doctor.py") if IS_WINDOWS
+                   else ("run.sh", "build.sh", "doctor.py")):
         path = os.path.join(ROOT, script)
         if not os.path.isfile(path):
             report.fail(section, "%s is missing - git clone looks incomplete" % script)
             continue
+        if IS_WINDOWS:
+            continue  # NTFS has no exec bit; PowerShell runs the .ps1 files regardless
         fix.make_executable(path, "chmod +x %s" % script)
         if not os.access(path, os.X_OK):
             report.warn(section, "%s is not executable" % script, hint="chmod +x %s" % path)
@@ -420,15 +444,24 @@ def docker_info(fmt):
 def check_docker(report):
     section = "Docker"
     if not shutil.which("docker"):
-        report.fail(section, "docker is not on PATH - run.sh starts a container",
+        report.fail(section, "docker is not on PATH - %s starts a container" % RUN_SCRIPT,
                     hint="install Docker (README.md Requirements); on Windows, Docker Desktop on WSL2 - docs/windows.md")
         return
     code, out, err = docker_info("{{.ServerVersion}}")
     if code != 0:
         detail = first_line(err) or first_line(out) or "docker info failed"
-        if "permission denied" in (err or "").lower():
+        text = (err or "").lower()
+        if IS_WINDOWS:
+            # The npipe in that message is Docker Desktop's own Linux-engine pipe, so the
+            # address is right for this host: what fails is the engine not answering, not
+            # the path. No keyword matching here - the error text arrives in the user's
+            # Windows locale ("Das System kann die angegebene Datei nicht finden").
+            hint = ("start Docker Desktop and wait until its engine reports running (%s starts it and waits "
+                    "up to 3 minutes); if it is already running, check the tray icon is on Linux containers "
+                    "and that `docker context ls` points at desktop-linux" % BUILD_CMD)
+        elif "permission denied" in text:
             hint = "the daemon is running but this user may not use it: sudo usermod -aG docker \"$USER\", then log out and in"
-        elif "cannot connect" in (err or "").lower() or "no such file" in (err or "").lower():
+        elif "cannot connect" in text or "no such file" in text:
             hint = "start the daemon (systemctl start docker), or check DOCKER_HOST / docker context use"
         else:
             hint = "check `docker info` by hand"
@@ -436,26 +469,72 @@ def check_docker(report):
         return
     report.ok(section, "docker daemon reachable (server %s)" % out.strip())
 
+    code, out, _ = docker_info("{{.OSType}}")
+    if code == 0 and out.strip().lower() == "windows":
+        report.fail(section, "the engine runs Windows containers - the image is Ubuntu 24.04, so it can't be built or run here",
+                    hint="Docker Desktop's tray icon: 'Switch to Linux containers' (%s checks this too)" % BUILD_CMD)
     code, out, _ = docker_info("{{.SecurityOptions}}")
     if code == 0 and "rootless" in out:
         report.note(section, "rootless Docker: dev keeps UID 1000:1000 (no remap), which is already your user",
-                    hint="set CONTAINER_UID in config/run.local.sh only if files come out owned by the wrong user")
+                    hint="set CONTAINER_UID in %s only if files come out owned by the wrong user" % LOCAL_CONFIG)
     code, out, _ = run(["docker", "version"])
     if code == 0 and "podman" in out.lower():
         report.note(section, "this is Podman behind the docker CLI: dev keeps UID 1000:1000, and nested Docker needs a look")
-    code, out, _ = docker_info("{{json .Runtimes}}")
-    if code == 0:
-        if "sysbox-runc" in out:
-            report.ok(section, "sysbox-runc is registered: --with-docker gets user-namespace isolation (docs/sysbox.md)")
-        else:
-            report.note(section, "no sysbox-runc runtime: --with-docker falls back to --privileged",
-                        hint="install sysbox for real isolation around a nested dockerd - docs/sysbox.md")
+    sysbox_finding(report, section)
     code, out, _ = run(["docker", "network", "ls", "--format", "{{.Name}}"])
     if code == 0 and "bridge" not in out.split():
-        report.warn(section, "Docker's default bridge network is not listed - run.sh uses it unless --host-network is passed")
+        report.warn(section, "Docker's default bridge network is not listed - %s uses it unless --host-network is passed" % RUN_SCRIPT)
 
 
-# --- config/run.local.sh -----------------------------------------------------------
+def sysbox_finding(report, section):
+    """The sysbox runtime, in the form that's true on this host: sysbox can't be
+    installed into Docker Desktop's VM at all, so there's nothing to install there."""
+    code, out, _ = docker_info("{{json .Runtimes}}")
+    if code != 0:
+        return
+    if "sysbox-runc" in out:
+        report.ok(section, "sysbox-runc is registered: --with-docker gets user-namespace isolation (docs/sysbox.md)")
+    elif IS_WINDOWS:
+        report.note(section, "no sysbox-runc, and Docker Desktop's VM can't run one: --with-docker always uses --privileged",
+                    hint="%s refuses --sysbox; that's privileged inside Docker Desktop's VM, not over Windows itself"
+                         " - docs/windows.md" % RUN_SCRIPT)
+    else:
+        report.note(section, "no sysbox-runc runtime: --with-docker falls back to --privileged",
+                    hint="install sysbox for real isolation around a nested dockerd - docs/sysbox.md")
+
+
+# --- config/run.local.sh (Linux) and config/run.local.ps1 (Windows) -----------------
+
+# Dot-sourced the way run.ps1 dot-sources it (the arrays initialised and the settings that
+# loosen the sandbox set to $null first, exactly as run.ps1 does), then dumped as
+# TAB-separated lines so Python can report what a Windows session would get by default.
+LOCAL_PS1_PROLOGUE = """
+$ErrorActionPreference = 'Stop'
+$EXTRA_MOUNTS = @(); $EXTRA_CONFIG_RO_PATHS = @(); $CA_CERTS = @()
+$HARNESS = $env:HARNESS; $CONTAINER_UID = $env:CONTAINER_UID; $CONTAINER_GID = $env:CONTAINER_GID
+$ENV_FILE = $env:ENV_FILE
+$WITH_DOCKER = $null; $BASH_SANDBOX = $null; $PROXY_LOGS = $null; $PROXY_LOG_DIR = $null
+$INSPECT = $null; $ALLOW_INTERNET = $null; $SINK_DIR = $null
+"""
+
+LOCAL_PS1_EPILOGUE = """
+foreach ($k in 'HARNESS','CONTAINER_UID','CONTAINER_GID','ENV_FILE','WITH_DOCKER','BASH_SANDBOX',
+                'PROXY_LOGS','PROXY_LOG_DIR','INSPECT','ALLOW_INTERNET','SINK_DIR') {
+  Write-Output ("V`t" + $k + "`t" + [string](Get-Variable -Name $k -ValueOnly -ErrorAction SilentlyContinue))
+}
+foreach ($a in 'EXTRA_MOUNTS','EXTRA_CONFIG_RO_PATHS','CA_CERTS') {
+  foreach ($v in @(Get-Variable -Name $a -ValueOnly -ErrorAction SilentlyContinue)) {
+    if ($null -ne $v) { Write-Output ("L`t" + $a + "`t" + [string]$v) }
+  }
+}
+"""
+
+
+def read_local_config(report):
+    """The per-machine config the entry point on this host reads: run.sh sources
+    config/run.local.sh, run.ps1 dot-sources config/run.local.ps1."""
+    return read_local_ps1(report) if IS_WINDOWS else read_local_sh(report)
+
 
 def read_local_sh(report):
     """Source config/run.local.sh the way run.sh does and return its settings
@@ -467,7 +546,7 @@ def read_local_sh(report):
         report.note(section, "no config/run.local.sh - everything keeps its default",
                     hint="copy config/run.local.sh.example to config/run.local.sh: default harness, "
                          "standing mounts, proxy logs, ...")
-        return {"V": {}, "L": {}}
+        return check_local_settings(report, section, {"V": {}, "L": {}})
 
     code, _out, err = run(["bash", "-n", path])
     if code != 0:
@@ -482,6 +561,66 @@ def read_local_sh(report):
                     hint=first_line(err))
         return {"V": {}, "L": {}}
 
+    settings = parse_settings(out)
+    report.ok(section, "config/run.local.sh sources cleanly")
+    warn_crlf(report, section, path,
+              "run.sh sources it, so a trailing \\r lands inside the value (HARNESS=claude\\r finds no such harness)")
+
+    # Typos in setting names are silent: only the names run.sh reads have any effect.
+    for lineno, line in enumerate(read_text(path).splitlines(), 1):
+        match = re.match(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=[^=]*$", line)
+        if not match:
+            continue
+        check_local_name(report, section, lineno, match.group(1))
+
+    return check_local_settings(report, section, settings)
+
+
+def read_local_ps1(report):
+    """Dot-source config/run.local.ps1 the way run.ps1 does, and return its settings in the
+    same shape as read_local_sh's. Bypass is passed because the finding here is about what
+    the file sets, not about this shell's script policy (docs/windows.md covers that)."""
+    section = "Local config"
+    path = os.path.join(ROOT, "config", "run.local.ps1")
+    if not os.path.isfile(path):
+        report.note(section, "no config\\run.local.ps1 - everything keeps its default",
+                    hint="copy config\\run.local.ps1.example to config\\run.local.ps1: default harness, "
+                         "standing mounts, proxy logs, ...")
+        return check_local_settings(report, section, {"V": {}, "L": {}})
+
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if not shell:
+        report.warn(section, "can't read config\\run.local.ps1: no PowerShell on PATH",
+                    hint="run.ps1 needs PowerShell too - see docs/windows.md")
+        return {"V": {}, "L": {}}
+
+    # -EncodedCommand (base64 UTF-16LE) rather than -Command with a quoted script: the
+    # snippet is full of quotes, tabs and $, and Windows' argument quoting would eat some
+    # of it. Both Windows PowerShell 5.1 and pwsh take it.
+    command = LOCAL_PS1_PROLOGUE + ". '" + path.replace("'", "''") + "'\n" + LOCAL_PS1_EPILOGUE
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    code, out, err = run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded])
+    if code != 0:
+        report.fail(section, "config\\run.local.ps1 fails when dot-sourced - run.ps1 stops at the same line",
+                    hint=first_line(err))
+        return {"V": {}, "L": {}}
+
+    settings = parse_settings(out)
+    # No CRLF check: PowerShell reads a CRLF file as-is and leaves no \r inside a value,
+    # which is the opposite of run.sh sourcing a shell file (docs/windows.md: Line endings).
+    report.ok(section, "config\\run.local.ps1 dot-sources cleanly")
+
+    for lineno, line in enumerate(read_text(path).splitlines(), 1):
+        match = re.match(r"^\s*\$([A-Z][A-Z0-9_]*)\s*(?:\+?=|=(?!=))", line)
+        if not match:
+            continue
+        check_local_name(report, section, lineno, match.group(1))
+
+    return check_local_settings(report, section, settings)
+
+
+def parse_settings(out):
+    """The TAB-separated dump both prologues print: 'V <name> <value>', 'L <array> <item>'."""
     settings = {"V": {}, "L": {}}
     for line in out.splitlines():
         parts = line.split("\t", 2)
@@ -492,33 +631,31 @@ def read_local_sh(report):
             settings["V"][key] = value
         else:
             settings["L"].setdefault(key, []).append(value)
+    return settings
 
-    report.ok(section, "config/run.local.sh sources cleanly")
-    warn_crlf(report, section, path,
-              "run.sh sources it, so a trailing \\r lands inside the value (HARNESS=claude\\r finds no such harness)")
 
-    # Typos in setting names are silent: only the names run.sh reads have any effect.
-    for lineno, line in enumerate(read_text(path).splitlines(), 1):
-        match = re.match(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=[^=]*$", line)
-        if not match:
-            continue
-        name = match.group(1)
-        if name in ("SQUID_LOGS", "SQUID_LOG_DIR"):
-            report.warn(section, "config/run.local.sh line %d: %s is deprecated" % (lineno, name),
-                        hint="rename it to %s" % name.replace("SQUID", "PROXY"))
-        elif name not in LOCAL_KEYS:
-            report.warn(section, "config/run.local.sh line %d: %s is not a setting run.sh reads" % (lineno, name),
-                        hint="config/run.local.sh.example lists the ones that exist - a typo here does nothing")
+def check_local_name(report, section, lineno, name):
+    """One assignment's name: a deprecated one, or one no entry point reads at all."""
+    if name in ("SQUID_LOGS", "SQUID_LOG_DIR"):
+        report.warn(section, "%s line %d: %s is deprecated" % (LOCAL_CONFIG, lineno, name),
+                    hint="rename it to %s" % name.replace("SQUID", "PROXY"))
+    elif name not in LOCAL_KEYS:
+        report.warn(section, "%s line %d: %s is not a setting %s reads" % (LOCAL_CONFIG, lineno, name, RUN_SCRIPT),
+                    hint="%s.example lists the ones that exist - a typo here does nothing" % LOCAL_CONFIG)
 
+
+def check_local_settings(report, section, settings):
+    """What those settings mean for the next session - shared by both hosts."""
     scalars, arrays = settings["V"], settings["L"]
 
     for name in ("WITH_DOCKER", "PROXY_LOGS", "INSPECT", "ALLOW_INTERNET"):
         value = scalars.get(name, "")
         if value and value != "1":
-            report.warn(section, "%s=%s in config/run.local.sh has no effect - only =1 turns it on" % (name, value))
-    if scalars.get("BASH_SANDBOX") not in ("", "0", "1"):
-        report.warn(section, "BASH_SANDBOX=%s in config/run.local.sh has no effect (only 0 changes anything)"
-                    % scalars["BASH_SANDBOX"])
+            report.warn(section, "%s=%s in %s has no effect - only =1 turns it on" % (name, value, LOCAL_CONFIG))
+    bash_sandbox = scalars.get("BASH_SANDBOX", "")
+    if bash_sandbox not in ("", "0", "1"):
+        report.warn(section, "BASH_SANDBOX=%s in %s has no effect (only 0 changes anything)"
+                    % (bash_sandbox, LOCAL_CONFIG))
     if scalars.get("ALLOW_INTERNET") == "1":
         report.warn(section, "ALLOW_INTERNET=1: every session gets the full internet - the allowlist "
                              "and the egress firewall are off",
@@ -528,18 +665,24 @@ def read_local_sh(report):
                     hint="pass --inspect for the one session you're debugging instead")
     if scalars.get("WITH_DOCKER") == "1":
         code, out, _ = docker_info("{{json .Runtimes}}")
-        if code == 0 and "sysbox-runc" not in out:
+        if code == 0 and "sysbox-runc" not in out and IS_WINDOWS:
+            report.warn(section, "WITH_DOCKER=1: every session runs --privileged, and Docker Desktop's VM has no "
+                                 "sysbox to make that narrower",
+                        hint="drop it from %s and pass --with-docker when you need a nested daemon - docs/windows.md"
+                             % LOCAL_CONFIG)
+        elif code == 0 and "sysbox-runc" not in out:
             report.warn(section, "WITH_DOCKER=1 without sysbox-runc: every session runs --privileged",
                         hint="install sysbox (docs/sysbox.md), or drop WITH_DOCKER=1 and pass --with-docker when needed")
 
     uid, gid = scalars.get("CONTAINER_UID", ""), scalars.get("CONTAINER_GID", "")
     if uid and uid != "off":
         if not uid.isdigit() or uid == "0":
-            report.fail(section, "CONTAINER_UID=%s is not a non-zero number (or 'off') - run.sh refuses it" % uid)
+            report.fail(section, "CONTAINER_UID=%s is not a non-zero number (or 'off') - %s refuses it"
+                        % (uid, RUN_SCRIPT))
         else:
             report.note(section, "CONTAINER_UID=%s: dev takes that UID inside the container" % uid)
     if gid and (not gid.isdigit() or gid == "0"):
-        report.fail(section, "CONTAINER_GID=%s is not a non-zero number - run.sh refuses it" % gid)
+        report.fail(section, "CONTAINER_GID=%s is not a non-zero number - %s refuses it" % (gid, RUN_SCRIPT))
 
     for name, values in arrays.items():
         for value in values:
@@ -550,8 +693,8 @@ def read_local_sh(report):
                 if os.path.isfile(cert):
                     report.ok(section, "CA_CERTS: %s" % cert)
                 else:
-                    report.fail(section, "CA_CERTS entry is not a file: %s - run.sh stops with 'file not found'" % value,
-                                hint="fix the path in config/run.local.sh or remove the entry")
+                    report.fail(section, "CA_CERTS entry is not a file: %s - %s stops there" % (value, RUN_SCRIPT),
+                                hint="fix the path in %s or remove the entry" % LOCAL_CONFIG)
             elif name == "EXTRA_CONFIG_RO_PATHS":
                 target = os.path.join(HOME, value)
                 if os.path.exists(target):
@@ -568,16 +711,22 @@ def read_local_sh(report):
         if os.path.isdir(target) and os.access(target, os.W_OK):
             report.ok(section, "%s=%s exists and is writable" % (name, target))
         elif os.path.isdir(parent) and os.access(parent, os.W_OK):
-            report.note(section, "%s=%s doesn't exist yet - run.sh creates it" % (name, target))
+            report.note(section, "%s=%s doesn't exist yet - %s creates it" % (name, target, RUN_SCRIPT))
         else:
-            report.warn(section, "%s=%s can't be created: %s isn't writable" % (name, target, parent),
-                        hint="if an older session created it as root: sudo chown -R \"$USER\": %s" % parent)
+            if IS_WINDOWS:
+                hint = "an older session or another tool may have created it read-only: check the ACL on %s" % parent
+            else:
+                hint = "if an older session created it as root: sudo chown -R \"$USER\": %s" % parent
+            report.warn(section, "%s=%s can't be created: %s isn't writable" % (name, target, parent), hint=hint)
 
     return settings
 
 
 def check_mount_spec(report, section, spec):
     """EXTRA_MOUNTS entries go straight into `docker run -v`: host[:container[:ro]]."""
+    if IS_WINDOWS:
+        check_mount_spec_windows(report, section, spec)
+        return
     parts = [expand(part) for part in spec.split(":")]
     if len(parts) > 3:
         report.fail(section, "EXTRA_MOUNTS entry '%s' isn't host[:container[:ro]]" % spec)
@@ -593,6 +742,31 @@ def check_mount_spec(report, section, spec):
             report.fail(section, "EXTRA_MOUNTS entry '%s': unknown option '%s' (only ro or rw)" % (spec, parts[2]))
 
 
+def check_mount_spec_windows(report, section, spec):
+    """run.ps1 splits these with its own regex rather than on ':': the drive letter's colon
+    is part of the host path, and the mount goes through `docker run --mount`, not -v."""
+    match = re.match(r"^(?P<host>(?:[A-Za-z]:)?[^:]+)(?::(?P<target>/[^:]*))?(?::(?P<mode>ro|rw))?$", spec)
+    if not match:
+        report.fail(section, "EXTRA_MOUNTS entry '%s' isn't host[:container][:ro] - %s refuses it"
+                    % (spec, RUN_SCRIPT),
+                    hint="e.g. C:\\data (mounted at /c/data), C:\\data:/data or C:\\data:/data:ro")
+        return
+    source = expand(match.group("host"))
+    target = match.group("target")
+    if "," in source or "," in (target or ""):
+        report.fail(section, "EXTRA_MOUNTS entry '%s' contains a ',' - %s can't mount it (docker --mount syntax)"
+                    % (spec, RUN_SCRIPT),
+                    hint="a comma can't be escaped in a --mount spec: keep that folder somewhere else")
+    if not os.path.exists(source):
+        report.warn(section, "EXTRA_MOUNTS source doesn't exist: %s" % source,
+                    hint="%s stops with 'mount source doesn't exist' - unlike -v, --mount never creates it"
+                         % RUN_SCRIPT)
+    if target is None and not re.match(r"^[A-Za-z]:", source):
+        report.fail(section, "EXTRA_MOUNTS entry '%s' has no container path, and '%s' can't be translated into one"
+                    % (spec, source),
+                    hint="only drive-letter paths map themselves (C:\\data -> /c/data); add ':/container' - docs/windows.md")
+
+
 # --- docker env file ---------------------------------------------------------------
 
 def resolve_env_file(report, section, scalars):
@@ -600,47 +774,59 @@ def resolve_env_file(report, section, scalars):
     exists. Returns the path in use, or None."""
     env_value = scalars.get("ENV_FILE", "")
     if env_value == "off":
-        report.note(section, "env file off (ENV_FILE=off in config/run.local.sh)")
+        report.note(section, "env file off (ENV_FILE=off in %s)" % LOCAL_CONFIG)
         return None
     if env_value:
         path = expand(env_value)
         if not os.path.isfile(path):
             report.fail(section, "ENV_FILE points at a file that doesn't exist: %s" % path,
-                        hint="run.sh stops with 'env file not found' - fix the path or remove ENV_FILE")
+                        hint="%s stops with 'env file not found' - fix the path or remove ENV_FILE" % RUN_SCRIPT)
             return None
         report.ok(section, "env file from ENV_FILE: %s" % path)
         return path
     if os.path.isfile(DEFAULT_ENV_FILE):
         report.ok(section, "env file (default): %s" % DEFAULT_ENV_FILE)
         return DEFAULT_ENV_FILE
+    if IS_WINDOWS:
+        hint = ("create it (NTFS keeps your own profile private by default) or set $ENV_FILE in %s if your "
+                "MCP config uses ${VAR}" % LOCAL_CONFIG)
+    else:
+        hint = "create it (chmod 600) or set ENV_FILE in %s if your MCP config uses ${VAR}" % LOCAL_CONFIG
     report.note(section, "no env file - %s doesn't exist (optional: tokens for MCP servers)" % DEFAULT_ENV_FILE,
-                hint="create it (chmod 600) or set ENV_FILE in config/run.local.sh if your MCP config uses ${VAR}")
+                hint=hint)
     return None
 
 
 def check_env_file(report, section, path, fix):
-    """Docker env file format: KEY=value per line, a bare KEY copies it from run.sh's own
-    environment, # starts a comment. run.sh exits on a bad name or a reserved one, and
-    warns about permissions and about the file sitting inside the mounted project."""
+    """Docker env file format: KEY=value per line, a bare KEY copies it from the entry
+    point's own environment, # starts a comment. run.sh/run.ps1 exit on a bad name or a
+    reserved one, and warn about permissions and about the file inside the mounted project."""
     text = read_text(path)
     if text is None:
         report.fail(section, "can't read env file: %s" % path)
         return
     mode = os.stat(path).st_mode
     name = os.path.basename(path)
-    if mode & 0o077:
+    if not IS_WINDOWS and mode & 0o077:
+        # Only on POSIX: st_mode on Windows is a fixed 0o666 for any file, so its bits say
+        # nothing about who can read it - the NTFS ACL does, which this can't read.
         report.warn(section, "%s is readable by other users (%03o) - it holds secrets" % (name, mode & 0o777),
                     hint="chmod 600 %s" % path)
         fix.apply("chmod 600 %s" % path, lambda: os.chmod(path, (mode & 0o7777) & ~0o0077))
     if not os.access(path, os.R_OK):
         report.fail(section, "%s is not readable by this user" % path)
         return
-    if path.startswith(os.path.abspath(os.getcwd()) + os.sep):
+    if os.path.normcase(path).startswith(os.path.normcase(os.path.abspath(os.getcwd())) + os.sep):
         report.warn(section, "%s is inside the current directory, which is mounted into the session" % path,
                     hint="keep it outside your projects - the harness can read and edit anything it's mounted on")
     if "\r" in text:
-        report.warn(section, "%s has CRLF line endings" % name,
-                    hint="docker keeps the \\r as part of the value: sed -i 's/\\r$//' %s" % path)
+        if IS_WINDOWS:
+            hint = ("PowerShell writes files that way; %s trims the \\r when it reads the names, but docker "
+                    "gets the file as written - rewrite it: (Get-Content -Raw '%s') -replace \"`r`n\", \"`n\" "
+                    "| Set-Content -NoNewline '%s'" % (RUN_SCRIPT, path, path))
+        else:
+            hint = "docker keeps the \\r as part of the value: sed -i 's/\\r$//' %s" % path
+        report.warn(section, "%s has CRLF line endings" % name, hint=hint)
 
     names = []
     problems = 0
@@ -651,14 +837,14 @@ def check_env_file(report, section, path, fix):
         key, sep, _value = line.partition("=")
         key = key.strip()
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
-            report.fail(section, "%s line %d: '%s' is not a valid variable name - run.sh refuses the whole file"
-                        % (name, lineno, key),
+            report.fail(section, "%s line %d: '%s' is not a valid variable name - %s refuses the whole file"
+                        % (name, lineno, key, RUN_SCRIPT),
                         hint="KEY=value per line, no quotes or 'export' around the name")
             problems += 1
             continue
         if is_reserved_env(key):
-            report.fail(section, "%s line %d: %s is reserved by the sandbox - run.sh refuses the whole file"
-                        % (name, lineno, key),
+            report.fail(section, "%s line %d: %s is reserved by the sandbox - %s refuses the whole file"
+                        % (name, lineno, key, RUN_SCRIPT),
                         hint="an env file setting a proxy variable or HOME would quietly undo the egress allowlist")
             problems += 1
             continue
@@ -689,7 +875,8 @@ def check_home_paths(report, section, conf, name, fix):
         report.fail(section, "$HOME (%s) is not a directory" % HOME)
         return
     if not os.access(HOME, os.W_OK):
-        report.fail(section, "$HOME (%s) is not writable - run.sh creates the harness's state dirs there" % HOME)
+        report.fail(section, "$HOME (%s) is not writable - %s creates the harness's state dirs there"
+                    % (HOME, RUN_SCRIPT))
 
     for entry in conf_list(conf, "state"):
         target = os.path.join(HOME, entry)
@@ -705,15 +892,19 @@ def check_home_paths(report, section, conf, name, fix):
 
             fixed = fix.apply("created %s" % target, make)
             if not fixed:
-                report.note(section, "~/%s doesn't exist yet - run.sh creates it" % entry,
+                report.note(section, "~/%s doesn't exist yet - %s creates it" % (entry, RUN_SCRIPT),
                             hint=FIRST_RUN_HINT % name)
 
     for entry in conf_list(conf, "staged"):
         target = os.path.join(HOME, entry)
         if os.path.isdir(target):
+            if IS_WINDOWS:
+                hint = "remove that directory and re-run %s - see README.md Troubleshooting" % RUN_SCRIPT
+            else:
+                hint = ("sudo rmdir %s, then chown -R \"$USER\": %s - see README.md Troubleshooting"
+                        % (target, os.path.dirname(target)))
             report.fail(section, "~/%s is a directory (left over from a run before that file existed)" % entry,
-                        hint="sudo rmdir %s, then chown -R \"$USER\": %s - see README.md Troubleshooting"
-                             % (target, os.path.dirname(target)))
+                        hint=hint)
             continue
         if os.path.isfile(target):
             report.ok(section, "~/%s exists (copied in read-only; edits are discarded on exit)" % entry)
@@ -725,7 +916,7 @@ def check_home_paths(report, section, conf, name, fix):
                     fh.write("{}\n" if target.endswith(".json") else "")
 
             if not fix.apply("created %s" % target, make):
-                report.note(section, "~/%s doesn't exist yet - run.sh creates it" % entry,
+                report.note(section, "~/%s doesn't exist yet - %s creates it" % (entry, RUN_SCRIPT),
                             hint=FIRST_RUN_HINT % name)
 
     present = [entry for entry in conf_list(conf, "config")
@@ -735,7 +926,7 @@ def check_home_paths(report, section, conf, name, fix):
     if present:
         report.ok(section, "config paths present, read-only unless --allow-config: %s" % ", ".join(present))
     if missing:
-        report.note(section, "config paths not on this host (run.sh skips them): %s" % ", ".join(missing))
+        report.note(section, "config paths not on this host (%s skips them): %s" % (RUN_SCRIPT, ", ".join(missing)))
 
     for entry in conf_list(conf, "tmpfs"):
         report.note(section, "~/%s is container-local tmpfs: writable in the session, never reaches $HOME" % entry)
@@ -778,7 +969,7 @@ def check_image(report, section, name):
     code, out, _err = run(["docker", "image", "inspect", "--format", "{{.Id}}\t{{.Created}}", image])
     if code != 0:
         report.fail(section, "image %s not found - a session can't start" % image,
-                    hint="./build.sh %s" % name)
+                    hint="%s %s" % (BUILD_CMD, name))
         return
     image_id, _, created = out.partition("\t")
     report.ok(section, "%s exists (%s)" % (image, image_id.split(":")[-1][:19]))
@@ -799,7 +990,7 @@ def check_image(report, section, name):
     if newest_dt > built:
         report.warn(section, "%s was built %s, before %s last changed - the change is not in the image"
                     % (image, built.strftime("%Y-%m-%d %H:%M"), os.path.relpath(newest_path, ROOT)),
-                    hint="./build.sh %s (README.md: a stale image runs the old version without warning)" % name)
+                    hint="%s %s (README.md: a stale image runs the old version without warning)" % (BUILD_CMD, name))
 
 
 def check_build_inputs(report, section, fix):
@@ -817,28 +1008,50 @@ def check_build_inputs(report, section, fix):
             report.fail(section, "config/%s is missing - docker build can't COPY it" % filename)
         else:
             report.note(section, "config/%s was missing and has just been created from its .example" % filename,
-                        hint="add your own entries - they only take effect after ./build.sh")
+                        hint="add your own entries - they only take effect after %s" % BUILD_CMD)
 
     path = os.path.join(ROOT, "config", "allowed-domains.txt")
     if os.path.isfile(path):
         check_allowlist(report, section, path, assembled=True)
 
 
+def container_path(win_path):
+    """run.ps1's ConvertTo-ContainerPath: C:\\Users\\me\\proj -> /c/Users/me/proj."""
+    match = re.match(r"^([A-Za-z]):[\\/]?(.*)$", win_path)
+    if not match:
+        return None
+    rest = match.group(2).replace("\\", "/").rstrip("/")
+    return "/%s%s" % (match.group(1).lower(), "/" + rest if rest else "")
+
+
 def check_project(report, section):
-    """run.sh binds $PWD at the same path inside the container, so the path itself has to
-    be mountable and writable."""
+    """The session project is bind-mounted, so the path itself has to be mountable and
+    writable. run.sh mounts $PWD at the same path; run.ps1 translates it (a drive letter's
+    colon is not a problem there, because it mounts with --mount rather than -v)."""
     pwd = os.getcwd()
     if not os.access(pwd, os.W_OK):
         report.fail(section, "%s is not writable by you - the harness works in a bind mount of it" % pwd)
+    elif IS_WINDOWS:
+        target = container_path(pwd)
+        report.ok(section, "session project: %s%s" % (pwd, " (mounted at %s)" % target if target else ""))
     else:
         report.ok(section, "session project: %s" % pwd)
-    if ":" in pwd:
+    if IS_WINDOWS:
+        if container_path(pwd) is None:
+            report.fail(section, "%s isn't a drive-letter path - %s can't map it into the container"
+                        % (pwd, RUN_SCRIPT),
+                        hint=r"UNC and \\wsl.localhost paths are refused: open a WSL shell there and use run.sh "
+                             "(docs/windows.md)")
+        if "," in pwd:
+            report.fail(section, "%s contains a ',' - %s can't mount it (docker --mount syntax)" % (pwd, RUN_SCRIPT),
+                        hint="move the project somewhere without a comma")
+    elif ":" in pwd:
         report.fail(section, "%s contains a ':' - run.sh passes it to docker -v, which splits on ':'" % pwd,
                     hint="run the session from a path without a colon, or use --mount host:container explicitly")
     if os.path.abspath(pwd) == ROOT:
         report.note(section, "this repo itself is the project - the sandbox can change its own files")
 
-    # Git worktree: $PWD/.git is a file pointing outside $PWD, so run.sh mounts the main
+    # Git worktree: $PWD/.git is a file pointing outside $PWD, so the runner mounts the main
     # repo's git dir - but only after checking the links both ways (see run.sh).
     dot_git = os.path.join(pwd, ".git")
     if not os.path.isfile(dot_git):
@@ -864,7 +1077,7 @@ def check_project(report, section):
     else:
         report.warn(section, "%s is a git worktree, but its git dir links don't check out - "
                             "git won't work in the container" % pwd,
-                    hint="the worktree looks broken or was moved; see run.sh's worktree block")
+                    hint="the worktree looks broken or was moved; see %s's worktree block" % RUN_SCRIPT)
 
 
 # --- output ------------------------------------------------------------------------
@@ -922,18 +1135,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="doctor.py",
         description="Check whether a session on this machine would start, and say what's missing.",
-        epilog="Reads the same config run.sh reads and asks docker what it knows; it never "
-               "starts a container, and writes nothing unless --fix is passed.",
+        epilog="Reads the same config the entry point on this host reads (run.sh's or run.ps1's) and asks "
+               "docker what it knows; it never starts a container, and writes nothing unless --fix is passed.",
     )
     parser.add_argument("harness", nargs="*",
-                        help="harness name(s) to check (default: HARNESS from config/run.local.sh, else claude)")
+                        help="harness name(s) to check (default: HARNESS from %s, else claude)" % LOCAL_CONFIG)
     parser.add_argument("--harness", dest="harness_flag", metavar="NAME",
-                        help="same as a positional name, for symmetry with run.sh")
+                        help="same as a positional name, for symmetry with %s" % RUN_SCRIPT)
     parser.add_argument("--all", action="store_true", help="check every harness under harnesses/")
-    parser.add_argument("--fix", action="store_true",
-                        help="do the safe repairs: seed config/allowed-domains.txt and "
-                             "config/extra-setup.sh from their .example, create the harness's "
-                             "state dirs and staged files, chmod 600 the env file, chmod +x the scripts")
+    fix_help = ("do the safe repairs: seed config/allowed-domains.txt and config/extra-setup.sh from their "
+                ".example, create the harness's state dirs and staged files")
+    if not IS_WINDOWS:
+        fix_help += ", chmod 600 the env file, chmod +x the scripts"
+    parser.add_argument("--fix", action="store_true", help=fix_help)
     parser.add_argument("--quiet", action="store_true", help="only show warnings and failures")
     parser.add_argument("--strict", action="store_true", help="also exit non-zero on warnings")
     parser.add_argument("--json", action="store_true", help="machine-readable report instead of text")
@@ -945,7 +1159,7 @@ def main(argv=None):
     check_host(report, fix)
     check_repo(report)
     check_docker(report)
-    settings = read_local_sh(report)
+    settings = read_local_config(report)
     env_path = resolve_env_file(report, "Env file", settings["V"])
     if env_path:
         check_env_file(report, "Env file", env_path, fix)

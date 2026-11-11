@@ -123,6 +123,31 @@ function claudecli { & 'C:\path\to\Agent-Container\run.ps1' @args }
 per-machine config like `run.local.sh`, copy `config\run.local.ps1.example` to
 `config\run.local.ps1`.
 
+## 5. If a session won't start
+
+```powershell
+python .\doctor.py            # or: py .\doctor.py claude
+```
+
+`doctor.py` is the same setup check as on Linux, pointed at the Windows files: it
+dot-sources `config\run.local.ps1` the way `run.ps1` does, reads `harness.conf` and the
+env file the way `run.ps1` reads them, and asks Docker Desktop's engine what it knows.
+Three things it answers differently here on purpose:
+
+- **A drive letter in a path is fine.** `run.ps1` mounts with
+  `docker run --mount type=bind,source=...,target=...`, so `C:\Apps\proj` is no problem -
+  the colon that splits `run.sh`'s `-v host:container` is a Linux issue. What `run.ps1`
+  does refuse is a path without a drive letter (UNC, `\\wsl.localhost\...`) and a path
+  containing `,`.
+- **CRLF is not a finding.** `run.ps1` reads `harness.conf` and the env file with
+  `[IO.File]::ReadAllLines`, which drops the `\r`, and the Dockerfile strips CRs from
+  everything it copies into the image. On Linux `run.sh` keeps the `\r` in the value,
+  which is why the same file warns there.
+- **`npipe:////./pipe/dockerDesktopLinuxEngine` is the right address.** If a check says
+  that pipe can't be opened, the address isn't wrong: Docker Desktop's engine is either
+  not running or switched to Windows containers. `build.ps1` starts it and waits;
+  `docker info` by hand is the quick check.
+
 ## How it differs from Linux
 
 - **Paths.** Windows paths can't appear unchanged inside a Linux container, so

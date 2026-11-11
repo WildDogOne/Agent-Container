@@ -90,12 +90,13 @@ Effective config on this machine:
     ...
 ```
 
-**Something in the way?** `./doctor.py` checks the machine the way `run.sh` reads it:
-does the daemon answer, is the image built and current, are the gitignored `config/`
-files in place, does `config/run.local.sh` parse, is the env file in the format docker
-wants, is `~/.claude.json` a file rather than a directory. Each finding names the file
-and the command that fixes it, and it exits non-zero only when something would actually
-stop a session.
+**Something in the way?** `./doctor.py` checks the machine the way `run.sh` reads it (on
+Windows, `python .\doctor.py` reads `run.ps1`'s files instead - see
+[docs/windows.md](docs/windows.md)): does the daemon answer, is the image built and
+current, are the gitignored `config/` files in place, does `config/run.local.sh` parse,
+is the env file in the format docker wants, is `~/.claude.json` a file rather than a
+directory. Each finding names the file and the command that fixes it, and it exits
+non-zero only when something would actually stop a session.
 
 ```sh
 ~/Agent-Container/doctor.py               # the default harness (or: doctor.py hermes)

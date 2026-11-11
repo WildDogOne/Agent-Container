@@ -109,6 +109,22 @@ the change takes effect.
 - `run.sh`/`run.ps1` **`--label key=value`** (repeatable): docker label on the session
   container, metadata only - lets an orchestrator (Agent-Fleet) find its sessions with
   `docker ps --filter label=...`. No rebuild.
+- `doctor.py` on a Windows host now reports what `run.ps1` would actually do, instead of
+  Linux answers with a caveat. It dot-sources `config\run.local.ps1` the way `run.ps1`
+  does (same variables seeded first) rather than looking for `config/run.local.sh`, and
+  the hints quote `.\build.ps1` and `config\run.local.ps1`. The findings that were wrong
+  on Windows are gone: a **drive letter in the project path** (`run.ps1` mounts with
+  `docker run --mount type=bind,source=...,target=...`, so the colon that splits
+  `run.sh`'s `-v host:container` is no problem - what `run.ps1` refuses is a path with no
+  drive letter, i.e. UNC or `\\wsl.localhost`, and a path containing `,`, and those are
+  what it reports now), and **CRLF in `harness.conf`** (`run.ps1` reads it with
+  `[IO.File]::ReadAllLines`, and the Dockerfile strips CRs on COPY). The env file's
+  mode check, `chmod +x`/exec-bit checks and "bash is not on PATH" are Linux-only;
+  sysbox is reported as unavailable on Docker Desktop rather than missing; an
+  unreachable daemon gets the Docker Desktop hint (start it, Linux-containers mode,
+  `docker context use desktop-linux`) instead of `systemctl start docker`; and a
+  reachable engine in Windows-containers mode is a blocking finding, since the image is
+  Ubuntu. No rebuild.
 
 ### Fixed
 
