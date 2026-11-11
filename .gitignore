@@ -16,4 +16,6 @@ config/run.local.sh
 config/run.local.ps1
 config/allowed-domains.txt
 config/extra-setup.sh
+config/flowaudit-prompt.md
+config/flowallow-prompt.md
 .test-tmp

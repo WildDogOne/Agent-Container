@@ -23,6 +23,14 @@ package manager. Everything is a shell script or config file consumed by
   `.example`: `run.local.sh`/`.ps1`, `extra-setup.sh`, `allowed-domains.txt`.
 - `tools/flowlog.py` - host-side analyzer for the `--proxy-logs` session logs
   (`summary`/`hosts`/`flows`/`show`/`grep`/`errors`/`denies`); not baked into the image.
+- `tools/flowaudit.py` - host-side wrapper that audits those logs with a headless
+  `run.sh --harness opencode -- run --auto` session and a predefined prompt
+  (`config/flowaudit-prompt.md`, seeded from the `.example`); writes
+  `report.md` + `VERDICT:` under `~/.local/state/agentcontainer/audits/`, exit
+  0/1/2 for clean/findings/failure (cron-able). `flowaudit suggest` instead
+  aggregates all deny events host-side and has a session triage them into a
+  mergeable `suggested-allowed-domains.txt` (prompt: `config/flowallow-prompt.md`);
+  it never writes the allowlist itself. Not baked into the image.
 - `lib/windows-common.ps1` - shared PowerShell helpers.
 
 **Keep harness specifics out of `image/`, `run.sh` and `run.ps1`.** If a new harness

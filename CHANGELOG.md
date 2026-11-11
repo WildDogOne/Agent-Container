@@ -9,6 +9,38 @@ the change takes effect.
 
 ### Added
 
+- `tools/flowaudit.py`: scheduled LLM security analysis of the `--proxy-logs`
+  session logs. `flowaudit` starts one headless sandbox session
+  (`run.sh --harness opencode -- run --auto <prompt>`) per batch: the audited
+  session logs are mounted read-only, `flowlog.py` is mounted into the
+  container so the agent can drill past the pre-computed digest
+  (summary/hosts/errors/denies), and the prompt template
+  (`config/flowaudit-prompt.md`, gitignored, seeded from the `.example`) tells
+  it to write `report.md` ending in `VERDICT: clean|suspicious|malicious`.
+  Each run lands in `~/.local/state/agentcontainer/audits/<UTC ts>/`
+  (prompt.md, digest.txt, run-output.txt, meta.json, report.md); the audit's
+  own proxy logs go to `audits/session-logs/` via `--proxy-logs=`, so an audit
+  never audits itself. `state.json` tracks audited sessions, so a plain
+  `flowaudit` (cron / systemd timer) only covers new ones; `list` shows the
+  audit state, `--dry-run` builds the digest without a container, `--model`
+  picks the model, `--env NAME[=VALUE]` passes the model provider's key (or
+  any other variable) into the analysis session, `--max-sessions N` caps one
+  batch to the N oldest pending sessions (default 20) so a backlog drains
+  batch by batch instead of overloading one analysis session; on `--timeout`
+  the still-running container is stopped by its `agentcontainer.audit` label.
+  Exit code 0 clean, 1 findings, 2 run failed - what cron mail and
+  `OnFailure=` alert on. Stdlib Python, host-side, not in the image.
+  No rebuild.
+- `tools/flowaudit.py suggest`: allowlist suggestions from the flow logs. Host-side
+  aggregation of every deny event (per host+port: denial count, sessions, methods,
+  first/last, plus whether the host is already in the baked allowlists - then it
+  can only be a session `--allow-list` override), triaged by a headless session
+  with flowlog drill-down. Writes `suggestions.md` + `suggestions.txt`
+  (`ALLOW`/`KEEP-DENIED`/`REVIEW`/`OVERRIDE`); flowaudit parses the latter into a
+  mergeable `suggested-allowed-domains.txt` and never edits `config/allowed-domains.txt`
+  itself - merging and rebuilding stay the operator's call. Prompt template
+  `config/flowallow-prompt.md` (seeded from the `.example`). Exit 0 nothing to add,
+  1 suggestions pending, 2 failed. No rebuild.
 - `doctor.py`: a setup check for the host, for the "why won't this start" case.
   `./doctor.py [harness...]` (or `--all`) reads the same config `run.sh` reads -
   `config/run.local.sh` (sourced the way `run.sh` sources it),
