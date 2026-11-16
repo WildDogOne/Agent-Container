@@ -473,6 +473,65 @@ if [ "${AGENTCONTAINER_BASH_SANDBOX:-}" = "1" ] || { [ -z "${AGENTCONTAINER_BASH
   fi
 fi
 
+# Caller flags win over the harness default's - literally, not only by coming last. The
+# "forwarded args come after it" trick above is what makes `--permission-mode manual`
+# override `auto`, but a flag that takes no value can also simply be *repeated*, and
+# opencode v2's parser rejects that ("Invalid value for flag --standalone: 2 occurrences")
+# instead of letting the later copy win. That is not hypothetical: Orca's chat->terminal
+# migration re-runs the chat's saved launch command, and for opencode that command already
+# carries the `--standalone` Orca added for the v2 API, so it lands on top of this
+# harness's `command=opencode --standalone`; any harness default can collide the same way
+# with whatever Orca (or anyone) saved. Drop the default's copy of any flag the caller
+# repeats, so the caller's copy is the only one. Only for a forwarded-flag call: a full
+# command override (`run.sh bash`) never uses the default at all.
+#
+# Kept deliberately dumb, so it can never eat more than the one repeated word:
+# - Exactly one default word per repeated flag. A flag with a value must be written as
+#   `--flag=value` in harness.conf (harnesses/README.md); nothing here guesses which flags
+#   take a value, so a following subcommand or positional is never taken for one.
+# - Only the caller's flag words count (start with `-`, before any `--` of their own), so
+#   a prompt or a positional that merely reads like a flag doesn't.
+# - A default with quotes or backslashes is left alone: splitting it on spaces would cut
+#   a quoted word in half and break the `zsh -lc` line below.
+# - The first word is the program and never compared.
+if [ "$#" -gt 0 ] && { [ "$1" = "--" ] || [ "${1#-}" != "$1" ]; }; then
+  case "$harness_command" in
+    *[\"\'\\]*) ;;
+    *)
+      set -f                            # split the default into words, without globbing it
+      kept="" dropped=""
+      for tok in $harness_command; do
+        if [ -n "$kept" ] && [ "${tok#-}" != "$tok" ] && [ "$tok" != "-" ]; then
+          name="${tok%%=*}"
+          repeated=0 first=1
+          for arg in "$@"; do
+            if [ "$arg" = "--" ]; then
+              if [ "$first" = 1 ]; then first=0; continue; fi   # run.sh's own leading `--`
+              break                     # the caller's own: positional args from here on
+            fi
+            first=0
+            case "$arg" in -?*) ;; *) continue ;; esac
+            if [ "${arg%%=*}" = "$name" ]; then
+              repeated=1
+              break
+            fi
+          done
+          if [ "$repeated" = 1 ]; then
+            dropped="$dropped $tok"
+            continue
+          fi
+        fi
+        kept="$kept $tok"
+      done
+      set +f
+      if [ -n "$dropped" ]; then
+        harness_command="${kept# }"
+        echo "entrypoint.sh: the caller repeats the harness default's$dropped - keeping the caller's copy" >&2
+      fi
+      ;;
+  esac
+fi
+
 if [ "$#" -eq 0 ]; then
   set -- zsh -lc "exec $harness_command"
 elif [ "$1" = "--" ]; then

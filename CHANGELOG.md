@@ -171,6 +171,22 @@ the change takes effect.
   They stayed root-owned, so `uvx` couldn't create `~/.local/share/uv` and every
   `uvx`-launched MCP server (e.g. `mcp-atlassian`) failed to start with "Permission denied"
   whenever proxy logs were on.
+- `image/entrypoint.sh` *(needs rebuild)*: a forwarded flag that repeats one of the harness
+  `command=` defaults is no longer passed twice. Forwarded args already come last ("last
+  one wins"), but opencode v2's parser *refuses* a repeated flag ("Invalid value for flag
+  `--standalone`: 2 occurrences") instead of overriding it. Orca's chat-to-terminal
+  migration re-runs the chat's saved launch command, which for opencode already carries the
+  `--standalone` Orca adds for the v2 API, so it collided with this harness's
+  `command=opencode --standalone` and the migrated session died on the CLI's help text.
+  Applies to every harness (any default can collide with a saved launch command): the
+  default's copy of a repeated flag is dropped - one word, never a guessed value word after
+  it - and the entrypoint names it on stderr. Only the caller's flag words count (prompts
+  and args after the caller's own `--` don't), and a default with quotes or backslashes is
+  left alone. A full command override (`run.sh bash`) never uses the default, so it stays
+  as it was.
+- `harnesses/claude/harness.conf` *(needs rebuild)*: the defaults now read
+  `--permission-mode=auto` (one word), so `run.sh --permission-mode manual` drops it
+  cleanly under the rule above. Valued flags in a `command=` default should use this form.
 
 ### Added
 
