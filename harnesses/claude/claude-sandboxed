@@ -101,6 +101,20 @@ case "${AGENTCONTAINER_DOCKER:-}" in
     echo "claude-sandboxed: Docker socket allowed in sandboxed commands (${AGENTCONTAINER_DOCKER} daemon)" >&2
     ;;
 esac
+# A read-write mount that is itself a Unix socket (e.g. Agent-Fleet's filtered Orca CLI
+# proxy, /run/fleet-orca-cli/orca.sock) was handed over to be connected to, and connect()
+# on a Unix socket needs more than allowWrite: apply-seccomp blocks socket(AF_UNIX) outright.
+# So such a mount turns on allowAllUnixSockets too - the same trade nested mode makes:
+# every *path* socket the sandbox can see becomes reachable, the root-equivalent
+# Docker/containerd ones stay denied as files (unless Docker was given on purpose), and
+# the per-command network namespace keeps abstract sockets apart.
+socket_mounts=$(printf '%s' "$rw_mounts" | jq -r '.[]' | while IFS= read -r p; do
+  [ -S "$p" ] && printf '%s\n' "$p"; done || true)
+sockets=false
+if [ -n "$socket_mounts" ]; then
+  sockets=true
+  echo "claude-sandboxed: Unix sockets allowed in sandboxed commands (socket mount: $(printf '%s' "$socket_mounts" | tr '\n' ' '))" >&2
+fi
 if [ "$rw_mounts" != "[]" ]; then
   echo "claude-sandboxed: sandboxed commands may also write to: $(printf '%s' "$rw_mounts" | jq -r 'join(" ")')" >&2
 fi
@@ -117,6 +131,7 @@ jq -n \
   --argjson env_vars "$env_vars" \
   --argjson nested "$nested" \
   --argjson docker "$docker" \
+  --argjson sockets "$sockets" \
   --argjson rw_mounts "$rw_mounts" \
   --arg settings_dir "$settings_dir" \
   '{
@@ -139,7 +154,7 @@ jq -n \
       } + (if ($rw_mounts | length) > 0 or $docker
            then { allowWrite: ($rw_mounts + (if $docker then ["~/.docker"] else [] end)) }
            else {} end)),
-      network: ({ allowedDomains: $domains } + (if $nested or $docker then { allowAllUnixSockets: true } else {} end))
+      network: ({ allowedDomains: $domains } + (if $nested or $docker or $sockets then { allowAllUnixSockets: true } else {} end))
     } + (if ($env_vars | length) > 0 then { credentials: { envVars: $env_vars } } else {} end)),
     permissions: ((if ($rw_mounts | length) > 0 then { additionalDirectories: $rw_mounts } else {} end) + {
       deny: [

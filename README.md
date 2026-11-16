@@ -453,7 +453,8 @@ it runs. Every Bash command then runs in bubblewrap, inside the container:
   read-write `--mount`/`EXTRA_MOUNTS` paths of this session.
 - **Docker:** with `--allow-container` or `--with-docker`, shell commands can use the
   Docker socket; without either flag the socket paths are denied and Unix sockets
-  blocked.
+  blocked. A Unix socket passed as a read-write `--mount` unblocks Unix sockets (the
+  Docker ones stay denied), so commands can connect to it.
 - **No way around it:** `allowUnsandboxedCommands` is off, so Claude can't rerun a
   failing command outside the sandbox, and there's no `sudo` in the container at all.
 

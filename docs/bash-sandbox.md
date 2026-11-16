@@ -25,6 +25,15 @@ flag, the socket paths are denied and Unix sockets are blocked. Docker access is
 over the daemon's host, so with these flags the Bash sandbox no longer contains a
 command that sets out to escape - that is what the flags already mean.
 
+## Mounted Unix sockets
+
+A read-write `--mount` whose source is a Unix socket (Agent-Fleet's Orca CLI proxy,
+for example) also allows Unix sockets in shell commands: `allowWrite` alone doesn't
+let a command connect, because Claude Code's seccomp filter blocks creating any Unix
+socket. The filter can't select by path, so this opens every socket path the sandbox can
+see - the same trade as nested mode below. The Docker/containerd sockets stay denied as
+files unless Docker was asked for, and abstract sockets stay apart (own network namespace).
+
 ## Under `--sysbox` (nested mode)
 
 The sandbox works under `--sysbox` too, in a nested mode that `claude-sandboxed` picks

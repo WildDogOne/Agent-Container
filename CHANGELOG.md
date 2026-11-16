@@ -9,6 +9,11 @@ the change takes effect.
 
 ### Added
 
+- **rebuild** `claude-sandboxed`: a read-write `--mount` that is a Unix socket turns on
+  `allowAllUnixSockets`, so sandboxed Bash can connect to it (before, seccomp blocked
+  `socket(AF_UNIX)` and only `allowWrite` was set). Docker/containerd sockets stay denied
+  unless Docker was requested. Needed for Agent-Fleet's Orca CLI proxy.
+
 - `tools/flowaudit.py`: scheduled LLM security analysis of the `--proxy-logs`
   session logs. `flowaudit` starts one headless sandbox session
   (`run.sh --harness opencode -- run --auto <prompt>`) per batch: the audited
