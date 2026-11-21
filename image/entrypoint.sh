@@ -445,6 +445,109 @@ if [ -d /etc/agentcontainer/staged ]; then
   done
 fi
 
+# run.sh --trust-workdir: pre-accept the harness's "trust this folder?" prompt, which
+# otherwise reappears in every new folder because the file holding it is staged (edits
+# discarded on exit). Only the one flag named by harness.conf `trust` is written, and only
+# into the container's copy: the file stays staged, so the session can't persist the rest
+# of what it holds (MCP servers, permission grants the host's own harness runs). run.sh
+# resolved the folder to the harness's own trust key (git root / main checkout) and passes
+# it absolute here; --allow-config is the other way to get this (then the harness's own
+# answer persists, so run.sh doesn't pass this).
+# Entry format: <staged path>:<json path with {} for the folder>, e.g.
+# .claude.json:projects.{}.hasTrustDialogAccepted
+if [ -n "${AGENTCONTAINER_TRUST_WORKDIR:-}" ]; then
+  case "$AGENTCONTAINER_TRUST_WORKDIR" in
+    /*) trust_folder="$AGENTCONTAINER_TRUST_WORKDIR" ;;
+    *)
+      echo "entrypoint.sh: AGENTCONTAINER_TRUST_WORKDIR must be an absolute path (got '$AGENTCONTAINER_TRUST_WORKDIR') - ignoring it" >&2
+      trust_folder=""
+      ;;
+  esac
+  for entry in $(sed -n 's/^trust=//p' /etc/agentcontainer/harness.conf | tail -n 1); do
+    [ -n "$trust_folder" ] || break
+    trust_rel="${entry%%:*}"
+    trust_path="${entry#*:}"
+    if [ "$trust_rel" = "$entry" ] || [ -z "$trust_path" ]; then
+      echo "entrypoint.sh: bad harness.conf trust entry '$entry' (want <path>:<json.path.{}.key>) - skipping it" >&2
+      continue
+    fi
+    # Only staged files: their container copy lives in the writable layer, so this can
+    # never reach the host. A `trust` entry naming a state/config path would be a host
+    # mount (rw or ro) instead, and writing trust there would persist session-chosen
+    # grants - so a trust entry must name one of the harness's `staged` files.
+    if [ ! -f "/etc/agentcontainer/staged/$trust_rel" ]; then
+      echo "entrypoint.sh: --trust-workdir: $trust_rel is not a harness.conf staged file - not setting the trust flag (a trust entry must name a staged file)" >&2
+      continue
+    fi
+    # -P: no cwd on sys.path. This runs as root with cwd = the (agent-writable) project
+    # dir, where a planted json.py would otherwise be imported by stdlib name.
+    if python3 -P - "$HOME/$trust_rel" "$trust_path" "$trust_folder" <<'TRUST_PY'
+import json, os, sys
+
+path, template, folder = sys.argv[1:4]
+try:
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+except Exception as exc:  # never rewrite a file we can't parse
+    print(f'entrypoint.sh: --trust-workdir: cannot parse {path} ({exc}) - not setting the trust flag', file=sys.stderr)
+    sys.exit(1)
+if '{}' not in template or not isinstance(data, dict):
+    print(f'entrypoint.sh: --trust-workdir: bad trust entry {template!r} (want dotted.path.{{}}.key) - skipping it', file=sys.stderr)
+    sys.exit(1)
+
+# projects.{}.hasTrustDialogAccepted -> ['projects'] + folder + ['hasTrustDialogAccepted']
+head, _, tail = template.partition('{}')
+keys = [k for k in head.split('.') if k]
+leaf = [k for k in tail.split('.') if k]
+
+def descend(node, key):
+    child = node.get(key)
+    if child is None:
+        child = {}
+        node[key] = child
+    elif not isinstance(child, dict):
+        # not the shape this template expects: refuse rather than overwrite whatever
+        # the harness keeps there
+        print(f'entrypoint.sh: --trust-workdir: {path} has a non-object at {key!r} - not setting the trust flag', file=sys.stderr)
+        sys.exit(1)
+    return child
+
+node = data
+for key in keys:
+    node = descend(node, key)
+if leaf:
+    node = descend(node, folder)
+    for key in leaf[:-1]:
+        node = descend(node, key)
+    holder, name = node, leaf[-1]
+else:
+    holder, name = node, folder
+if holder.get(name) is True:
+    sys.exit(3)  # already trusted: leave the file byte-identical
+holder[name] = True
+
+# Same-dir temp + replace, so a crash mid-write can't leave a truncated config behind
+# (the harness's recovery reads it at start).
+tmp = f'{path}.agentcontainer-trust'
+with open(tmp, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+os.replace(tmp, path)
+TRUST_PY
+    then
+      chown dev:dev "$HOME/$trust_rel"
+      chmod 600 "$HOME/$trust_rel"
+      echo "entrypoint.sh: --trust-workdir: marked $trust_folder as trusted in $HOME/$trust_rel (container copy only)" >&2
+    else
+      trust_rc=$?
+      case "$trust_rc" in
+        3) echo "entrypoint.sh: --trust-workdir: $trust_folder is already trusted in $HOME/$trust_rel" >&2 ;;
+        *) echo "entrypoint.sh: --trust-workdir: could not set the trust flag in $HOME/$trust_rel (exit $trust_rc)" >&2 ;;
+      esac
+    fi
+  done
+fi
+
 # Default command from the harness.conf baked into the image (see harnesses/README.md).
 # Sandbox-friendly defaults belong there rather than in the harness's own config on the
 # host - e.g. Claude Code's `--permission-mode auto`, which the sandbox (no host access

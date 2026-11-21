@@ -180,6 +180,7 @@ harness. They can go anywhere in the argument list:
 | `--with-docker`                          | Run a nested `dockerd` in the container (with `--privileged`, or sysbox if installed). Off by default, see [below](#docker-inside-the-sandbox). |
 | `--sysbox`                               | Implies `--with-docker` and forces the `sysbox-runc` runtime instead of `--privileged`. See [docs/sysbox.md](docs/sysbox.md). |
 | `--allow-config`                         | Let the harness change its config on the host. Read-only by default, see [below](#what-the-container-can-see).                      |
+| `--trust-workdir`                        | Pre-accept the "trust this folder?" prompt for the folder you start in (Claude Code only): sets just that flag, in the container's copy of the trust file, so it doesn't reset every session. Ignored with `--allow-config`, which already persists it. |
 | `--no-bash-sandbox`                      | Don't start the harness's `sandboxed_command` even if it has one (default where the harness defines one; for Claude Code: the [Bash sandbox](#bash-sandbox)). `--bash-sandbox` forces it on; refused if the harness defines no `sandboxed_command`. |
 | `--env-file FILE`                        | Pass the variables in `FILE` (docker env file) into the session, e.g. MCP tokens. See [below](#secrets-for-mcp-servers).            |
 | `--no-env-file`                          | Pass no env file, not even the default `~/.config/agentcontainer.env`.                                                              |
@@ -358,7 +359,10 @@ top of it. `~/.claude.json` is copied in instead, because Claude Code rewrites i
 every start - so changing settings or installing plugins fails in-session, and trust
 prompts reset every session. Pass `--allow-config` to mount all of it read-write; if
 your settings point at other files (e.g. a statusline script), add them with
-`EXTRA_CONFIG_RO_PATHS+=(.claude/statusline.sh)` in `config/run.local.sh`.
+`EXTRA_CONFIG_RO_PATHS+=(.claude/statusline.sh)` in `config/run.local.sh`. If the only
+thing you want to stop is the "trust this folder?" prompt, pass `--trust-workdir`
+instead: it sets just that one flag, for the folder you start in, in the container's own
+copy - nothing else in `~/.claude.json` (MCP servers, permission grants) is persisted.
 
 For mounts you need in every session on this machine, copy
 `config/run.local.sh.example` to `config/run.local.sh` (gitignored) and fill in

@@ -146,7 +146,9 @@ flowchart LR
   changing a setting fails inside the session unless you pass `--allow-config`.
 - **Copied in:** `~/.claude.json` is rewritten by Claude Code on every start, so it's
   mounted read-only elsewhere and copied into place. Trust prompts and other state in it
-  reset every session.
+  reset every session - pass `--trust-workdir` to pre-accept the folder you start in
+  without mounting the file read-write (only the trust flag is set, in the container's
+  copy).
 - **Egress:** only through the proxy, to the domains in `harnesses/claude/allowed-domains.txt`
   plus the shared defaults.
 - **Bash sandbox caveat, sysbox only:** under `--sysbox` the Bash sandbox falls back to
@@ -161,6 +163,7 @@ flowchart LR
 | You want to | Do this |
 |---|---|
 | Change a setting, install a plugin or MCP server | Run once with `--allow-config`. |
+| Stop the "trust this folder?" prompt in a new folder | `--trust-workdir` for the folder you start in (sets only that flag, in the container's copy of `~/.claude.json`), or `--allow-config` if you want the answer saved on the host for good. |
 | Keep a statusline script (or another file settings point at) read-only | `EXTRA_CONFIG_RO_PATHS+=(.claude/statusline.sh)` in `config/run.local.sh`. |
 | Reach another domain | Add it to `config/allowed-domains.txt` and `./build.sh claude`, or `--allow-list FILE` for one session. |
 | Update Claude Code | `./build.sh claude` (always `--no-cache`, pulls the latest release). |

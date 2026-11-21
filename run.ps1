@@ -103,6 +103,7 @@ $allowList = ''
 $allowInternet = $false
 $allowContainer = $false
 $allowConfig = $false
+$trustWorkDir = $false
 $withDocker = $false
 $sysbox = $false
 $cliBashSandbox = $false
@@ -134,6 +135,7 @@ while ($i -lt $cliArgs.Count) {
     '--allow-internet'  { $allowInternet = $true; $i++; continue }
     '--allow-container' { $allowContainer = $true; $i++; continue }
     '--allow-config'    { $allowConfig = $true; $i++; continue }
+    '--trust-workdir'   { $trustWorkDir = $true; $i++; continue }
     '--with-docker'     { $withDocker = $true; $i++; continue }
     '--sysbox'          { $sysbox = $true; $i++; continue }
     '--bash-sandbox'    { $cliBashSandbox = $true; $i++; continue }
@@ -337,6 +339,38 @@ $harnessStaged = @(Split-HarnessList (Get-HarnessConf 'staged'))
 $harnessTmpfs = @(Split-HarnessList (Get-HarnessConf 'tmpfs'))
 $configRoPaths = @(Split-HarnessList (Get-HarnessConf 'config')) + @($EXTRA_CONFIG_RO_PATHS)
 
+# See run.sh: --trust-workdir pre-accepts the harness's "trust this folder?" prompt by
+# having entrypoint.sh set one JSON flag (harness.conf `trust` = <staged file>:<json path
+# with {} for the folder>) in the container's copy of that file. The folder key is the
+# container-side path (that's what the harness computes inside), resolved from the git
+# repository root - the main checkout in a worktree, $PWD outside a repo.
+$harnessTrust = @(Split-HarnessList (Get-HarnessConf 'trust'))
+$trustKey = ''
+if ($trustWorkDir -and @($harnessTrust).Count -eq 0) {
+  Write-Warning "run.ps1: --trust-workdir passed, but harness '$harnessName' has no trust= entry in $harnessConfFile - ignoring it"
+  $trustWorkDir = $false
+}
+if ($trustWorkDir -and $allowConfig) {
+  Write-Host 'run.ps1: --trust-workdir ignored with --allow-config: the trust file is mounted read-write, so the dialog answer persists on its own'
+  $trustWorkDir = $false
+}
+if ($trustWorkDir) {
+  $trustRootWin = $projectDir
+  $gitCommonDir = Invoke-NativeCapture git.exe @('-C', $projectDir, 'rev-parse', '--path-format=absolute', '--git-common-dir')
+  if ($gitCommonDir) {
+    $gitCommonDir = [IO.Path]::GetFullPath(($gitCommonDir -replace '/', '\'))
+    if ((Test-Path -LiteralPath (Join-Path $projectDir '.git') -PathType Leaf) -and
+        ((Split-Path -Leaf $gitCommonDir) -ieq '.git') -and
+        (Test-Path -LiteralPath (Split-Path -Parent $gitCommonDir) -PathType Container)) {
+      $trustRootWin = Split-Path -Parent $gitCommonDir
+    } else {
+      $topLevel = Invoke-NativeCapture git.exe @('-C', $projectDir, 'rev-parse', '--show-toplevel')
+      if ($topLevel) { $trustRootWin = [IO.Path]::GetFullPath(($topLevel -replace '/', '\')) }
+    }
+  }
+  $trustKey = ConvertTo-ContainerPath $trustRootWin
+}
+
 # See run.sh: the Bash sandbox (harness's sandboxed_command) is ON by default where the
 # harness defines one; --no-bash-sandbox or $BASH_SANDBOX = 0 turns it off,
 # --bash-sandbox forces it on and fails if the harness has none.
@@ -442,7 +476,7 @@ if ($showHelp) {
 
   @"
 Usage: run.ps1 [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
-               [--allow-container | --with-docker] [--allow-config]
+               [--allow-container | --with-docker] [--allow-config] [--trust-workdir]
                [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
                [--no-bash-sandbox] [--env-file <path> | --no-env-file]
                 [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect]
@@ -470,6 +504,7 @@ Effective config on this machine:
   Allowlist:      $listDesc
   Docker socket:  $sockDesc
   Harness config: $cfgDesc
+  Workspace trust: $(if ($trustWorkDir) { "pre-accepted for $trustKey (--trust-workdir: flag only, in the container's copy)" } else { 'asked per folder (pass --trust-workdir to pre-accept this folder)' })
   dev UID:GID:    $remapDesc
   Bash sandbox:   $bashSandboxDesc
   Env file:       $envDesc
@@ -613,6 +648,10 @@ if ($allowConfig) {
     Add-Bind (Get-HostHomePath $entry) "/etc/agentcontainer/staged/$entry" -ReadOnly
   }
 }
+
+# See run.sh: --trust-workdir passes the folder entrypoint.sh marks as trusted in the
+# container's copy of the harness.conf `trust` file(s).
+if ($trustWorkDir) { $dockerArgs.AddRange([string[]]@('-e', "AGENTCONTAINER_TRUST_WORKDIR=$trustKey")) }
 
 # See run.sh: Docker-in-Docker is opt-in (--with-docker). By default there is no nested
 # dockerd and no --privileged at all. No sysbox on Docker Desktop (refused above), so

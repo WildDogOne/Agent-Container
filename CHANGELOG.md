@@ -9,6 +9,23 @@ the change takes effect.
 
 ### Added
 
+- `run.sh --trust-workdir` (and `run.ps1`): stops the "trust this folder?" prompt from
+  resetting every session. Claude Code keeps that answer as
+  `projects["<path>"].hasTrustDialogAccepted` in `~/.claude.json`, which is a `staged`
+  file without `--allow-config` - the copy is writable in the container, but the answer
+  is discarded on exit, so every fresh folder asks again. Mounting the file rw would let
+  a session persist the rest of it (personal MCP servers, permission grants) into the
+  host's own `claude`, so instead `entrypoint.sh` sets only that one flag - for the
+  session's folder, resolved by `run.sh` to the git repo root (the main checkout in a
+  worktree, `$PWD` outside a repo) - in the container's copy, which stays discarded.
+  Which file and key is harness-specific, so it's a new `harness.conf` key,
+  `trust=<staged file>:<json path with {} for the folder>` (only `claude` has one;
+  `harnesses/README.md`), read by all three readers. Ignored, with a warning, together
+  with `--allow-config` (there the answer persists on its own) and for a harness without
+  a `trust` entry. Trade-off to know: the session never sees the dialog's list of what
+  the folder's settings grant, since the dialog never appears. **rebuild**
+  (`image/entrypoint.sh` + `harnesses/claude/harness.conf`).
+
 - **rebuild** `claude-sandboxed`: a read-write `--mount` that is a Unix socket turns on
   `allowAllUnixSockets`, so sandboxed Bash can connect to it (before, seccomp blocked
   `socket(AF_UNIX)` and only `allowWrite` was set). Docker/containerd sockets stay denied

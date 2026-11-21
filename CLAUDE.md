@@ -59,6 +59,7 @@ run.sh --ca-cert ~/corp-root-ca.crt       # import an extra root CA into the con
 run.sh --label fleet.session=abc         # docker label on the session container (repeatable, metadata only - Agent-Fleet finds its sessions by it)
 run.sh --env NAME=VALUE                  # one variable for this session (repeatable; env-file name rules)
 run.sh --loopback-socket 47823:/path.sock # 127.0.0.1:47823 in the container -> host Unix socket (image/loopback-forward.py; Linux only, not with --host-network)
+run.sh --trust-workdir                 # pre-accept the "trust this folder?" prompt for this folder: entrypoint.sh sets only that JSON flag (harness.conf `trust=<staged file>:<json path with {} for the folder>`) in the container's copy of the staged file - the file itself stays discarded; ignored with --allow-config
 run.sh -- "fix the bug"                   # `--` ends run.sh's flags: the rest goes to the harness verbatim, positional args included (entrypoint.sh strips the `--`)
 run.sh --allow-container                  # mount the HOST's docker.sock in (no nested dockerd, no privileges - off by default, root-equivalent host access; excludes --with-docker/--sysbox)
 run.sh --with-docker                      # nested dockerd + privileges: sysbox-runc runtime if registered on the host, --privileged otherwise (off by default - no Docker at all otherwise)
@@ -98,8 +99,10 @@ to `command`; `=1` with no `sandboxed_command` refuses to start), `state` (rw di
 `/etc/agentcontainer/staged/<path>` and copied into `$HOME` by `entrypoint.sh`; created on
 the host if missing, `{}` for `.json`), `owned` (absolute image paths that must belong
 to `dev`: chowned to 1000:1000 by `install.sh`, re-chowned by `entrypoint.sh` only when
-the UID remap moved `dev`). Parsed by `run.sh` (bash), `run.ps1`, and `entrypoint.sh`
-(only `command`, `sandboxed_command` and `owned`, from the copy baked into
+the UID remap moved `dev`), `trust` (optional: `<staged file>:<json path with {} for the
+folder>` - the key `run.sh --trust-workdir` sets true, in the container's staged copy only,
+never a host mount). Parsed by `run.sh` (bash), `run.ps1`, and `entrypoint.sh`
+(only `command`, `sandboxed_command`, `owned` and `trust`, from the copy baked into
 `/etc/agentcontainer/`). `run.sh --env-file` passes a docker env file through and lists
 its variable names in `AGENTCONTAINER_ENV_KEYS`, which `entrypoint.sh` adds to its
 `preserve_env` list (the drop to `dev` starts from an empty environment). `--env` names

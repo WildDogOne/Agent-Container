@@ -115,6 +115,19 @@
 # run the harness natively, so a session that gets talked into editing them could
 # escape the sandbox. See harnesses/README.md.
 #
+# `--trust-workdir` (consumed here, not forwarded on) stops the harness's "trust this
+# folder?" prompt from reappearing in every new folder. That answer (for Claude Code:
+# projects["<path>"].hasTrustDialogAccepted in ~/.claude.json) lives in a `staged` file,
+# so without --allow-config it is discarded when the session exits. Rather than widen
+# --allow-config to that file (it also holds personal MCP servers and permission grants,
+# which the host's own harness would then run), run.sh resolves the folder to the key the
+# harness uses (git repo root, main checkout in a worktree, the folder itself outside a
+# repo), passes it to entrypoint.sh, and entrypoint.sh sets that one JSON flag to true in
+# the container's copy - everything else in the file still dies with the container. Which
+# file/key is harness-specific: harness.conf `trust=<staged file>:<json path with {} for
+# the folder>`. What you give up: the session never sees the dialog's list of what the
+# folder's settings grant. Ignored with --allow-config, where the answer persists anyway.
+#
 # `--bash-sandbox` / `--no-bash-sandbox` (consumed here, not forwarded on) control
 # whether the harness's `sandboxed_command` (if it has one) is started instead of its
 # `command` - ON by default. For Claude Code, `sandboxed_command` is its own Bash sandbox
@@ -171,6 +184,7 @@ allow_list=""
 allow_internet=0
 allow_container=0
 allow_config=0
+trust_workdir=0
 with_docker=0
 sysbox=0
 cli_bash_sandbox=0
@@ -234,6 +248,7 @@ while [[ $# -gt 0 ]]; do
     --allow-internet) allow_internet=1; shift ;;
     --allow-container) allow_container=1; shift ;;
     --allow-config) allow_config=1; shift ;;
+    --trust-workdir) trust_workdir=1; shift ;;
     --with-docker) with_docker=1; shift ;;
     --sysbox) sysbox=1; with_docker=1; shift ;;
     --harness)
@@ -468,6 +483,46 @@ read -r -a harness_config <<< "$(harness_conf config)"
 read -r -a harness_tmpfs <<< "$(harness_conf tmpfs)"
 config_ro_paths=(${harness_config[@]+"${harness_config[@]}"} ${EXTRA_CONFIG_RO_PATHS[@]+"${EXTRA_CONFIG_RO_PATHS[@]}"})
 
+# run.sh --trust-workdir: pre-accept the harness's "trust this folder?" prompt for the
+# session's folder. Claude Code keeps that as projects["<path>"].hasTrustDialogAccepted
+# in ~/.claude.json, which without --allow-config is a staged copy (edits discarded on
+# exit), so a fresh folder re-prompts every session. Mounting that file rw instead would
+# let a session persist MCP servers and permission grants the host's own claude runs -
+# so only the flag is set, by entrypoint.sh, in the container's own copy. Which file and
+# which JSON key is harness-specific, so harness.conf names it (`trust`, see
+# harnesses/README.md): <staged file>:<json path with {} for the folder>.
+trust_entries=($(harness_conf trust))
+trust_key=""
+if [[ "$trust_workdir" -eq 1 && ${#trust_entries[@]} -eq 0 ]]; then
+  echo "run.sh: --trust-workdir passed, but harness '$harness' has no trust= entry in $harness_conf_file - ignoring" >&2
+  trust_workdir=0
+fi
+if [[ "$trust_workdir" -eq 1 && "$allow_config" -eq 1 ]]; then
+  echo "run.sh: --trust-workdir ignored with --allow-config: the trust file is mounted read-write, so the dialog's answer persists on its own" >&2
+  trust_workdir=0
+fi
+if [[ "$trust_workdir" -eq 1 ]]; then
+  # The folder to trust, resolved host-side (git is guaranteed here, and the session's
+  # directory may not be a repo at all). Claude keys trust on the git repository root -
+  # for a worktree, on the main checkout's root - and falls back to the start directory
+  # outside a repo. Same-path-both-sides mount, so the key matches what the harness
+  # computes inside the container.
+  trust_key="$PWD"
+  if command -v git >/dev/null 2>&1; then
+    # --git-common-dir is absolute via --path-format (git >= 2.31). In a linked worktree
+    # $PWD/.git is a file and the common dir is <main>/.git, so the main checkout - what
+    # Claude keys trust on - is its parent.
+    wt_common_dir="$(git -C "$PWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [[ -n "$wt_common_dir" && -f "$PWD/.git" && "$(basename "$wt_common_dir")" == ".git" \
+          && -d "$(dirname "$wt_common_dir")" ]]; then
+      trust_key="$(dirname "$wt_common_dir")"
+    else
+      top_level="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+      [[ -n "$top_level" ]] && trust_key="$top_level"
+    fi
+  fi
+fi
+
 # The Bash sandbox is ON by default for harnesses that define a sandboxed_command;
 # --no-bash-sandbox or BASH_SANDBOX=0 turns it off. --bash-sandbox forces it on and is
 # refused for a harness without one. entrypoint.sh refuses too, but checking here gives
@@ -633,6 +688,7 @@ if [[ "$show_help" -eq 1 ]]; then
   cat <<EOF
 Usage: run.sh [--harness <name>] [--host-network] [--allow-list <path> | --allow-internet]
               [--allow-container | --with-docker [--sysbox]] [--allow-config]
+              [--trust-workdir]
               [--mount <path|host:container[:ro]>]... [--ca-cert <path>]...
               [--no-bash-sandbox] [--env-file <path> | --no-env-file]
               [--proxy-logs[=<path>] | --no-proxy-logs] [--inspect] [--sink <dir>]
@@ -695,6 +751,18 @@ harness's login/state are mounted in; the container is removed on exit (--rm).
                     exit. Session state (transcripts, history, login) stays writable
                     either way. Consumed
                     here, never forwarded to docker/the harness.
+  --trust-workdir   Pre-accept the harness's "trust this folder?" prompt for the folder
+                    this session starts in, so it doesn't reappear in every new
+                    directory. entrypoint.sh sets only that one flag (for Claude Code:
+                    hasTrustDialogAccepted, keyed on the git repo root - the main
+                    checkout in a worktree, the folder itself outside a repo) in the
+                    container's own copy of the harness's trust file. The file itself
+                    stays staged, so nothing else it holds (MCP servers, permission
+                    grants) is persisted - and the session never sees the dialog's list
+                    of what the folder grants, which is what the prompt is for. Needs a
+                    \`trust\` entry in harness.conf (only claude has one); ignored, with a
+                    warning, together with --allow-config (there the answer already
+                    persists). Consumed here, never forwarded to docker/the harness.
   --sysbox          Implies --with-docker and forces the sysbox-runc OCI runtime instead
                     of --privileged, for real user-namespace isolation around the nested
                     dockerd. Must already be installed and registered with this host's
@@ -771,6 +839,7 @@ Effective config on this machine:
   Allowlist:      $([[ "$allow_internet" -eq 1 ]] && echo "DISABLED ($allow_internet_src - any host/port reachable, nftables egress firewall also off)" || { [[ -n "$allow_list" ]] && echo "$allow_list (--allow-list passed, overrides image default)" || echo "image default (allowed-domains.txt baked in at build; pass --allow-list to override)"; })
   Docker socket:  $([[ "$allow_container" -eq 1 ]] && echo "HOST /var/run/docker.sock (--allow-container passed - root-equivalent host access)" || { [[ "$with_docker" -eq 1 ]] && echo "nested dockerd in the container ($with_docker_src)" || echo "none (default; pass --with-docker for a nested dockerd, --allow-container for the host daemon)"; })
   Harness config: $([[ "$allow_config" -eq 1 ]] && echo "WRITABLE (--allow-config passed - edits persist on the host)" || echo "read-only (default; pass --allow-config to let the harness change it)")
+  Workspace trust: $( [[ "$trust_workdir" -eq 1 ]] && echo "pre-accepted for $trust_key (--trust-workdir: flag only, in the container's copy)" || echo "asked per folder (pass --trust-workdir to pre-accept this folder)")
   dev UID:GID:    $remap_desc
   Bash sandbox:   $bash_sandbox_desc
   Env file:       $([[ -n "$env_file" ]] && echo "$env_file ($env_file_desc: ${env_keys:-no variables})" || echo "$env_file_desc")
@@ -957,6 +1026,14 @@ else
   for entry in ${harness_staged[@]+"${harness_staged[@]}"}; do
     docker_args+=(-v "$HOME/$entry:/etc/agentcontainer/staged/$entry:ro")
   done
+fi
+
+# --trust-workdir: the folder entrypoint.sh records as trusted in the container's copy of
+# the harness.conf `trust` file(s) (see there). run.sh already resolved the key to the
+# git root / main-checkout root; the file itself stays staged either way, so this only
+# ever writes into the container's writable layer.
+if [[ "$trust_workdir" -eq 1 ]]; then
+  docker_args+=(-e "AGENTCONTAINER_TRUST_WORKDIR=$trust_key")
 fi
 
 # Docker-in-Docker is opt-in (--with-docker / --sysbox): by default there is no nested
