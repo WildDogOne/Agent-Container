@@ -947,6 +947,23 @@ if [[ -t 0 && -t 1 ]]; then
   docker_args+=(-t)
 fi
 
+# resolve_path: what GNU's `realpath -e`/`-m` do - absolute, symlinks resolved, the last
+# component allowed to be missing - in portable bash. macOS ships no realpath at all and
+# BSD's has no -e/-m, so calling that below made every worktree session on a Mac fall into
+# the warning there. Only the parent has to exist; echoes nothing and fails if it can't be
+# resolved, so the -n checks in the block below still decide.
+resolve_path() {
+  local target="$1" dir base parent
+  [[ -n "$target" ]] || return 1
+  [[ "$target" == /* ]] || target="$PWD/$target"
+  while [[ "$target" != "/" && "$target" == */ ]]; do target="${target%/}"; done
+  if [[ "$target" == "/" ]]; then printf '/\n'; return 0; fi
+  dir="${target%/*}"; base="${target##*/}"
+  [[ -n "$dir" ]] || dir="/"
+  parent="$(cd -P -- "$dir" 2>/dev/null && pwd)" || return 1
+  printf '%s/%s\n' "${parent%/}" "$base"
+}
+
 # Git worktree: $PWD/.git is a file pointing into <main-repo>/.git/worktrees/<name>, outside
 # $PWD, so git inside the container would find no repository. Mount the common git dir
 # (objects, refs, the worktree's own metadata) read-write at its own path. Read-write is
@@ -962,12 +979,12 @@ if [[ -f "$PWD/.git" ]] && command -v git >/dev/null 2>&1; then
   wt_git_dir="$(git -C "$PWD" rev-parse --absolute-git-dir 2>/dev/null || true)"
   git_common_dir="$(git -C "$PWD" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
   if [[ -n "$wt_git_dir" && -n "$git_common_dir" ]]; then
-    wt_git_dir="$(realpath -e "$wt_git_dir" 2>/dev/null || true)"
-    git_common_dir="$(realpath -e "$git_common_dir" 2>/dev/null || true)"
-    back_link="$(realpath -m "$(cat "$wt_git_dir/gitdir" 2>/dev/null || true)" 2>/dev/null || true)"
+    wt_git_dir="$(resolve_path "$wt_git_dir" || true)"
+    git_common_dir="$(resolve_path "$git_common_dir" || true)"
+    back_link="$(resolve_path "$(cat "$wt_git_dir/gitdir" 2>/dev/null || true)" || true)"
     if [[ -n "$wt_git_dir" && -n "$git_common_dir" \
           && "$(dirname "$wt_git_dir")" == "$git_common_dir/worktrees" \
-          && "$back_link" == "$(realpath -e "$PWD/.git")" \
+          && "$back_link" == "$(resolve_path "$PWD/.git" || true)" \
           && -f "$git_common_dir/HEAD" && -d "$git_common_dir/objects" && -d "$git_common_dir/refs" \
           && "$git_common_dir" != "$PWD"/* \
           && "$HOME/" != "$git_common_dir"/* ]]; then

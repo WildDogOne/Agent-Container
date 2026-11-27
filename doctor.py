@@ -25,6 +25,10 @@ On a Windows host it checks the Windows side of the same things: config/run.loca
 instead of run.local.sh, run.ps1's mount rules (a drive letter's colon is fine there -
 run.ps1 uses `docker run --mount`, not -v), and Docker Desktop's Linux engine.
 
+On a macOS host the Linux-side checks are the right ones - `run.sh` runs on the Mac and
+the container runs in Docker Desktop's Linux VM - but the Docker findings use Docker
+Desktop's wording and its limits (docs/macos.md).
+
 Exit code 0 when nothing would stop a session, 1 when something would (--strict makes
 warnings count too). Stdlib only, like the other host-side tools in tools/.
 """
@@ -47,15 +51,24 @@ HOME = os.path.expanduser("~")
 DEFAULT_ENV_FILE = os.path.join(HOME, ".config", "agentcontainer.env")
 
 IS_WINDOWS = platform.system() == "Windows"
+IS_MAC = platform.system() == "Darwin"
 # The two hosts read different files and mount differently (docs/windows.md), so the
 # findings and the hints have to quote the entry point this machine actually uses.
 RUN_SCRIPT = "run.ps1" if IS_WINDOWS else "run.sh"
 BUILD_CMD = r".\build.ps1" if IS_WINDOWS else "./build.sh"
 LOCAL_CONFIG = os.path.join("config", "run.local.ps1" if IS_WINDOWS else "run.local.sh")
+# Docker Desktop's Linux VM is the engine on Windows and macOS alike: sysbox can't be
+# installed into it, and --host-network/--allow-container/--loopback-socket reach the VM
+# rather than the host, so those findings need the same wording on both.
+DOCKER_DESKTOP_HOST = IS_WINDOWS or IS_MAC
+HOST_DOC = "docs/windows.md" if IS_WINDOWS else "docs/macos.md"
+# Docker Desktop for Mac only exposes these to its VM by default; a bind mount of a path
+# outside them is refused or arrives empty (Settings > Resources > File sharing adds more).
+MAC_SHARED_DEFAULTS = ("/Users", "/Volumes", "/private", "/tmp")
 
 # harnesses/README.md: the keys run.sh/entrypoint.sh read. Anything else in a
 # harness.conf is a typo, and run.sh just ignores it.
-HARNESS_KEYS = ("command", "sandboxed_command", "state", "tmpfs", "config", "staged", "owned")
+HARNESS_KEYS = ("command", "sandboxed_command", "state", "tmpfs", "config", "staged", "owned", "trust")
 
 # config/run.local.sh.example: the settings run.sh looks for. An uppercase assignment
 # outside this list is a typo that silently does nothing.
@@ -284,6 +297,12 @@ def check_harness_conf(report, section, name):
     if conf_value(conf, "sandboxed_command").strip():
         report.note(section, "Bash sandbox: on by default (%s); --no-bash-sandbox or BASH_SANDBOX=0 turns it off"
                     % conf_value(conf, "sandboxed_command").strip())
+        if IS_MAC:
+            report.note(section, "that sandbox is bubblewrap inside the container, so it needs unprivileged user "
+                                 "namespaces in Docker Desktop's VM - doctor.py can't test that without starting "
+                                 "a container",
+                        hint="if sandboxed Bash fails with 'Operation not permitted', start the session with "
+                             "--no-bash-sandbox (docs/macos.md)")
 
     for key in ("state", "config", "staged", "tmpfs"):
         raw = conf_value(conf, key)
@@ -397,6 +416,14 @@ def check_host(report, fix):
                     hint="the checks below read what %s reads: %s, harnesses/<name>/harness.conf, the env "
                          "file and Docker Desktop's engine; only the sysbox note is Linux-only"
                          % (RUN_SCRIPT, LOCAL_CONFIG))
+    elif system == "Darwin":
+        report.ok(section, "macOS %s (%s): the scripts run here, the container in Docker Desktop's Linux VM"
+                  % (platform.mac_ver()[0] or "?", platform.machine()))
+        report.note(section, "Docker Desktop's VM, not macOS, is what the container sees: --sysbox can't be "
+                             "installed into it, --host-network shares the VM's network namespace (and skips the "
+                             "nftables egress firewall), and --allow-container/--loopback-socket reach sockets in "
+                             "that VM rather than the Mac's",
+                    hint="docs/macos.md")
     else:
         report.warn(section, "%s isn't a supported host - the image is Ubuntu 24.04 and run.sh is written for Linux" % system,
                     hint="see README.md Requirements")
@@ -445,7 +472,8 @@ def check_docker(report):
     section = "Docker"
     if not shutil.which("docker"):
         report.fail(section, "docker is not on PATH - %s starts a container" % RUN_SCRIPT,
-                    hint="install Docker (README.md Requirements); on Windows, Docker Desktop on WSL2 - docs/windows.md")
+                    hint="install Docker (README.md Requirements); on Windows or macOS it's Docker Desktop - "
+                         "docs/windows.md, docs/macos.md")
         return
     code, out, err = docker_info("{{.ServerVersion}}")
     if code != 0:
@@ -459,6 +487,12 @@ def check_docker(report):
             hint = ("start Docker Desktop and wait until its engine reports running (%s starts it and waits "
                     "up to 3 minutes); if it is already running, check the tray icon is on Linux containers "
                     "and that `docker context ls` points at desktop-linux" % BUILD_CMD)
+        elif IS_MAC:
+            # No systemctl and no docker group on a Mac: the engine is Docker Desktop's,
+            # and it answers on ~/.docker/run/docker.sock, not /var/run/docker.sock.
+            hint = ("start Docker Desktop and wait until its engine reports running; if it is already running, "
+                    "check the tray icon is on Linux containers and that `docker context ls` points at "
+                    "desktop-linux (%s)" % HOST_DOC)
         elif "permission denied" in text:
             hint = "the daemon is running but this user may not use it: sudo usermod -aG docker \"$USER\", then log out and in"
         elif "cannot connect" in text or "no such file" in text:
@@ -488,16 +522,17 @@ def check_docker(report):
 
 def sysbox_finding(report, section):
     """The sysbox runtime, in the form that's true on this host: sysbox can't be
-    installed into Docker Desktop's VM at all, so there's nothing to install there."""
+    installed into Docker Desktop's VM at all, on Windows or macOS, so there's nothing
+    to install there."""
     code, out, _ = docker_info("{{json .Runtimes}}")
     if code != 0:
         return
     if "sysbox-runc" in out:
         report.ok(section, "sysbox-runc is registered: --with-docker gets user-namespace isolation (docs/sysbox.md)")
-    elif IS_WINDOWS:
+    elif DOCKER_DESKTOP_HOST:
         report.note(section, "no sysbox-runc, and Docker Desktop's VM can't run one: --with-docker always uses --privileged",
-                    hint="%s refuses --sysbox; that's privileged inside Docker Desktop's VM, not over Windows itself"
-                         " - docs/windows.md" % RUN_SCRIPT)
+                    hint="%s refuses --sysbox; that's privileged inside Docker Desktop's VM, not over %s itself - %s"
+                         % (RUN_SCRIPT, "Windows" if IS_WINDOWS else "your Mac", HOST_DOC))
     else:
         report.note(section, "no sysbox-runc runtime: --with-docker falls back to --privileged",
                     hint="install sysbox for real isolation around a nested dockerd - docs/sysbox.md")
@@ -665,11 +700,11 @@ def check_local_settings(report, section, settings):
                     hint="pass --inspect for the one session you're debugging instead")
     if scalars.get("WITH_DOCKER") == "1":
         code, out, _ = docker_info("{{json .Runtimes}}")
-        if code == 0 and "sysbox-runc" not in out and IS_WINDOWS:
+        if code == 0 and "sysbox-runc" not in out and DOCKER_DESKTOP_HOST:
             report.warn(section, "WITH_DOCKER=1: every session runs --privileged, and Docker Desktop's VM has no "
                                  "sysbox to make that narrower",
-                        hint="drop it from %s and pass --with-docker when you need a nested daemon - docs/windows.md"
-                             % LOCAL_CONFIG)
+                        hint="drop it from %s and pass --with-docker when you need a nested daemon - %s"
+                             % (LOCAL_CONFIG, HOST_DOC))
         elif code == 0 and "sysbox-runc" not in out:
             report.warn(section, "WITH_DOCKER=1 without sysbox-runc: every session runs --privileged",
                         hint="install sysbox (docs/sysbox.md), or drop WITH_DOCKER=1 and pass --with-docker when needed")
@@ -1048,6 +1083,10 @@ def check_project(report, section):
     elif ":" in pwd:
         report.fail(section, "%s contains a ':' - run.sh passes it to docker -v, which splits on ':'" % pwd,
                     hint="run the session from a path without a colon, or use --mount host:container explicitly")
+    if IS_MAC and not any(pwd == share or pwd.startswith(share + "/") for share in MAC_SHARED_DEFAULTS):
+        report.warn(section, "%s is outside Docker Desktop's default file-sharing set - the bind mount of it is "
+                             "refused or arrives empty" % pwd,
+                    hint="Docker Desktop: Settings > Resources > File sharing, add this path (%s)" % HOST_DOC)
     if os.path.abspath(pwd) == ROOT:
         report.note(section, "this repo itself is the project - the sandbox can change its own files")
 

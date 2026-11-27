@@ -35,6 +35,10 @@ been tested on Windows yet.
 - Or Windows 10/11 with Docker Desktop on WSL2: see [docs/windows.md](docs/windows.md),
   where `setup.ps1` installs everything and `build.ps1`/`run.ps1` replace the shell
   scripts.
+- Or macOS with Docker Desktop: the same `build.sh`/`run.sh` run on the Mac and the
+  container runs in Docker Desktop's Linux VM. See [docs/macos.md](docs/macos.md) for
+  what differs there - no sysbox, and `--host-network`/`--allow-container`/
+  `--loopback-socket` reach the VM rather than macOS.
 - Optional: [sysbox](docs/sysbox.md), for a nested Docker daemon (`--with-docker`) with
   real isolation instead of `--privileged`.
 
@@ -109,7 +113,8 @@ non-zero only when something would actually stop a session.
 ```
 
 On Windows, `python .\doctor.py` reads `run.ps1`'s files instead - see
-[docs/windows.md](docs/windows.md).
+[docs/windows.md](docs/windows.md). On macOS it reads the same files as on Linux and
+phrases the Docker findings for Docker Desktop - see [docs/macos.md](docs/macos.md).
 
 ### Hermes Agent
 
@@ -319,7 +324,7 @@ flowchart LR
 | `image/` | The shared sandbox: `Dockerfile`, `entrypoint.sh`, the mitmproxy egress addon and the default allowlist. Nothing harness-specific. |
 | `config/` | Your per-machine settings, see [Configuration](#configuration). |
 | `lib/` | Helpers for the PowerShell scripts. |
-| `docs/` | Per-harness quickstarts, Windows and sysbox setup, and the deep dives linked below. |
+| `docs/` | Per-harness quickstarts, Windows/macOS and sysbox setup, and the deep dives linked below. |
 
 ## What the container can see
 
@@ -508,13 +513,17 @@ sandbox and is deleted when the container exits, and the host's daemon isn't rea
 Nested `dockerd` needs heavy privileges: `run.sh` uses the `sysbox-runc` runtime when
 this host has it registered (real user-namespace isolation, see
 [docs/sysbox.md](docs/sysbox.md)), and `--privileged` otherwise; `--sysbox` forces the
-sysbox runtime and fails if it isn't installed.
+sysbox runtime and fails if it isn't installed. Sysbox can't be installed into Docker
+Desktop's VM, so a Windows or macOS host always gets `--privileged` - inside that VM, not
+over your machine ([docs/windows.md](docs/windows.md), [docs/macos.md](docs/macos.md)).
 
 `--allow-container` instead mounts the **host's** `/var/run/docker.sock` (no nested
 daemon, no `--privileged`). Containers you start then run on the host daemon as siblings
 of the sandbox, and they outlive it. **This is root-equivalent access to the host**:
 `docker run -v /:/host ...` is enough to get a root shell there. Only use it when you
-trust everything running inside. It can't be combined with `--with-docker`/`--sysbox`.
+trust everything running inside. It can't be combined with `--with-docker`/`--sysbox`,
+and on macOS there is no host `/var/run/docker.sock` to mount, so `run.sh` refuses the
+flag there.
 
 With the [Bash sandbox](#bash-sandbox) on, either flag also lets sandboxed shell
 commands use the socket - otherwise `docker` would be unusable in exactly the sessions

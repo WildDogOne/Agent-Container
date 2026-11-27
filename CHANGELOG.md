@@ -9,6 +9,18 @@ the change takes effect.
 
 ### Added
 
+- **macOS is a documented host.** `build.sh`, `run.sh`, `doctor.py` and `tools/` run
+  unchanged on the Mac and the container runs in Docker Desktop's Linux VM. `README.md`
+  Requirements and the new `docs/macos.md` say what differs there: Docker Desktop only
+  shares `/Users`, `/Volumes`, `/private` and `/tmp` with its VM, sysbox can't be
+  installed into that VM, `--allow-container` refuses (a Mac has no host
+  `/var/run/docker.sock`), `--loopback-socket` is Linux-only, and `--host-network`
+  shares the VM's namespace while skipping the nftables firewall. `doctor.py` no longer
+  calls Darwin an unsupported host: it reports the host plus those VM caveats, phrases a
+  daemon that isn't answering for Docker Desktop (no `systemctl`, no `docker` group),
+  treats a missing `sysbox-runc` as expected there as it already did on Windows, and warns
+  when the session project sits outside the default shared folders. No rebuild.
+
 - `run.sh --trust-workdir` (and `run.ps1`): stops the "trust this folder?" prompt from
   resetting every session. Claude Code keeps that answer as
   `projects["<path>"].hasTrustDialogAccepted` in `~/.claude.json`, which is a `staged`
@@ -182,6 +194,15 @@ the change takes effect.
 
 ### Fixed
 
+- `run.sh` on macOS: the git worktree mount resolved its paths with GNU `realpath -e`
+  and `realpath -m`, which macOS doesn't ship at all, so every worktree session printed
+  "its git dir links don't check out" and started without the main repo's git dir
+  mounted - git found no repository in the container. The three calls now go through a
+  `resolve_path` helper in portable bash (`cd -P` + `pwd`, last component allowed to be
+  missing), which also resolves `..` and symlinks the way the GNU flags did. No rebuild.
+- `doctor.py`: `trust=` in a `harness.conf` was reported as an unknown key, although
+  `--trust-workdir` made it a documented key (`harnesses/README.md`) that both `run.sh`
+  and `entrypoint.sh` read.
 - `image/entrypoint.sh` *(needs rebuild)*: directories Docker creates under `$HOME` as
   parents of bind mounts (`~/.local`, `~/.local/state` from `--proxy-logs`, `~/.config`
   from a `~/.config/...` mount, ...) are now chowned to `dev`, not just `$HOME` itself.

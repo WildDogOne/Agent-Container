@@ -256,6 +256,15 @@ scripts have not been tested on Windows yet.
 - Record user-visible changes (new flags, changed defaults, removals) under
   `## Unreleased` in `CHANGELOG.md`; mark entries that need an image rebuild.
 
+- **macOS is a supported host and runs the same shell scripts**, so `run.sh`, `build.sh`
+  and `doctor.py` must stay compatible with macOS's `/bin/bash` 3.2 and with no GNU
+  coreutils: no bash-4 features (`declare -A`, `${x^^}`, `mapfile`, negative indices),
+  no GNU-only flags (`realpath -e/-m`, `stat -c`, `date -d`) - `run.sh`'s `resolve_path`
+  and its `ls -ld` mode check are the portable substitutes. Docker Desktop's Linux VM is
+  the engine there, so sysbox, `--host-network`, `--allow-container` and
+  `--loopback-socket` don't mean what they do on Linux (`docs/macos.md`); `doctor.py`'s
+  `IS_MAC`/`DOCKER_DESKTOP_HOST` branches keep that wording honest.
+
 - The default container is unprivileged: no `--privileged`, no nested `dockerd`
   (`entrypoint.sh` starts it only with `WITH_DOCKER=1`, set by `--with-docker`/`--sysbox`,
   which then add `--privileged` or the sysbox runtime). `dev` has no sudo in the image
